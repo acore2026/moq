@@ -51,8 +51,10 @@ func main() {
 		ALPNs: ALPNS,
 		QuicConfig: &quic.Config{
 			EnableDatagrams: true,
+			KeepAlivePeriod: 2 * time.Second,
 		},
-		TLSConfig: mustLoadTLSConfig(CERTPATH),
+		TLSConfig:                 mustLoadTLSConfig(CERTPATH),
+		EnableConnectionMigration: true,
 	}
 
 	pub := api.NewMOQPub(Options, RELAY)
