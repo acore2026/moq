@@ -212,6 +212,7 @@ func (subscriber *RelayHandler) HandleSubscribe(msg *wire.Subscribe) {
 
 	if isCached {
 		if stream := rs.GetSourceStream(); stream != nil {
+			stream.WgAdd()
 			go subscriber.ProcessMOQTStreamFrom(stream, startIndex)
 		}
 	}

@@ -7,6 +7,7 @@ import (
 
 	"github.com/DineshAdhi/moq-go/moqt"
 	"github.com/DineshAdhi/moq-go/moqt/wire"
+	"github.com/rs/zerolog/log"
 )
 
 type MOQSub struct {
@@ -55,6 +56,7 @@ func (pub *MOQSub) Connect() (*moqt.SubHandler, error) {
 }
 
 func (sub *MOQSub) connectOnce() (*moqt.SubHandler, error) {
+	log.Info().Msgf("subscriber dialing relay %s", sub.Relay)
 
 	dialer := moqt.MOQTDialer{
 		Options: sub.Options,
@@ -65,8 +67,11 @@ func (sub *MOQSub) connectOnce() (*moqt.SubHandler, error) {
 	session, err := dialer.Dial(sub.Relay)
 
 	if err != nil {
+		log.Warn().Err(err).Msgf("subscriber dial failed %s", sub.Relay)
 		return nil, err
 	}
+
+	log.Info().Msg("subscriber connected")
 
 	handler := session.SubHandler()
 	handler.AttachResumeTracker(sub.resumeTracker)
@@ -128,6 +133,8 @@ func (sub *MOQSub) monitorSessions() {
 		case <-handler.MOQTSession.Done():
 		}
 
+		log.Warn().Msg("subscriber session closed, starting reconnect loop")
+
 		if !sub.reconnectLoop() {
 			return
 		}
@@ -145,7 +152,10 @@ func (sub *MOQSub) reconnectLoop() bool {
 		}
 
 		if _, err := sub.connectOnce(); err == nil {
+			log.Info().Msg("subscriber reconnect succeeded")
 			return true
+		} else {
+			log.Warn().Err(err).Dur("backoff", backoff).Msg("subscriber reconnect failed")
 		}
 
 		if !sub.waitBackoff(backoff) {
