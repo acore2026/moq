@@ -48,14 +48,14 @@ func main() {
 
 	sub := api.NewMOQSub(Options, RELAY)
 
-	handler, err := sub.Connect()
+	_, err := sub.Connect()
 
 	sub.OnStream(func(ss moqt.SubStream) {
 		go handleStream(&ss)
 	})
 
 	sub.OnAnnounce(func(ns string) {
-		handler.Subscribe(ns, "dumeel", 0)
+		sub.Subscribe(ns, "dumeel", 0)
 	})
 
 	if err != nil {
@@ -63,7 +63,7 @@ func main() {
 		return
 	}
 
-	handler.Subscribe("bbb", "dumeel", 0)
+	sub.Subscribe("bbb", "dumeel", 0)
 
 	<-sub.Ctx.Done()
 }

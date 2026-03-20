@@ -10,13 +10,15 @@ type SubStream struct {
 	StreamID    string
 	SubID       uint64
 	StreamsChan chan wire.MOQTStream
+	Tracker     *ResumeTracker
 }
 
-func NewSubStream(streamid string, subid uint64) *SubStream {
+func NewSubStream(streamid string, subid uint64, tracker *ResumeTracker) *SubStream {
 	return &SubStream{
 		StreamID:    streamid,
 		SubID:       subid,
 		StreamsChan: make(chan wire.MOQTStream),
+		Tracker:     tracker,
 	}
 }
 
@@ -33,5 +35,5 @@ func (sub *SubStream) AcceptStream(stream wire.MOQTStream) {
 }
 
 func (sub *SubStream) ProcessObjects(stream wire.MOQTStream, reader quicvarint.Reader) {
-	sub.StreamsChan <- stream
+	sub.StreamsChan <- NewResumableStream(stream, sub.StreamID, sub.Tracker)
 }

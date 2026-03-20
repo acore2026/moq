@@ -14,6 +14,7 @@ type SubHandler struct {
 	SubscribedStreams StreamsMap[*SubStream]
 	StreamsChan       chan SubStream
 	AnnounceChan      chan string
+	ResumeTracker     *ResumeTracker
 }
 
 func NewSubHandler(session *MOQTSession) *SubHandler {
@@ -22,7 +23,12 @@ func NewSubHandler(session *MOQTSession) *SubHandler {
 		SubscribedStreams: NewStreamsMap[*SubStream](session),
 		StreamsChan:       make(chan SubStream),
 		AnnounceChan:      make(chan string),
+		ResumeTracker:     nil,
 	}
+}
+
+func (sub *SubHandler) AttachResumeTracker(tracker *ResumeTracker) {
+	sub.ResumeTracker = tracker
 }
 
 func (sub *SubHandler) Subscribe(ns string, name string, alias uint64) {
@@ -37,9 +43,13 @@ func (sub *SubHandler) Subscribe(ns string, name string, alias uint64) {
 		FilterType:     wire.LatestGroup,
 	}
 
+	if sub.ResumeTracker != nil {
+		msg = sub.ResumeTracker.BuildSubscribe(ns, name, alias, subid)
+	}
+
 	sub.CS.WriteControlMessage(&msg)
 
-	substream := NewSubStream(msg.GetStreamID(), subid)
+	substream := NewSubStream(msg.GetStreamID(), subid, sub.ResumeTracker)
 	sub.SubscribedStreams.AddStream(subid, substream)
 }
 
@@ -82,6 +92,7 @@ func (sub *SubHandler) DoHandle() {
 
 		if err != nil {
 			sub.Slogger.Error().Msgf("[Error Accepting Unistream][%s]", err)
+			sub.Close(wire.MOQERR_INTERNAL_ERROR, "[Subscriber Unistream Closed]")
 			return
 		}
 
@@ -103,4 +114,5 @@ func (sub *SubHandler) DoHandle() {
 
 func (sub *SubHandler) HandleClose() {
 	close(sub.StreamsChan)
+	close(sub.AnnounceChan)
 }

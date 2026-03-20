@@ -3,6 +3,7 @@ package moqt
 import (
 	"fmt"
 	"strings"
+	"sync"
 
 	"github.com/DineshAdhi/moq-go/moqt/wire"
 
@@ -41,6 +42,8 @@ type MOQTSession struct {
 	Handler       Handler
 	Mode          uint8
 	HandshakeDone chan bool
+	Closed        chan struct{}
+	closeOnce     sync.Once
 }
 
 func CreateMOQSession(conn MOQTConnection, LocalRole uint64, mode uint8) (*MOQTSession, error) {
@@ -53,6 +56,7 @@ func CreateMOQSession(conn MOQTConnection, LocalRole uint64, mode uint8) (*MOQTS
 	session.LocalRole = LocalRole
 	session.Mode = mode
 	session.HandshakeDone = make(chan bool, 1)
+	session.Closed = make(chan struct{})
 
 	session.Slogger = log.With().Str("ID", session.Id).Str("Role", wire.GetRoleStringVarInt(session.RemoteRole)).Logger()
 
@@ -72,14 +76,21 @@ func (s *MOQTSession) isUpstream() bool {
 }
 
 func (s *MOQTSession) Close(code uint64, msg string) {
-	s.Conn.CloseWithError(quic.ApplicationErrorCode(code), msg)
-	s.cancelFunc()
+	s.closeOnce.Do(func() {
+		s.Conn.CloseWithError(quic.ApplicationErrorCode(code), msg)
+		s.cancelFunc()
 
-	s.Slogger.Error().Msgf("[%s][Closing MOQT Session][Code - %d]%s", s.Id, code, msg)
+		s.Slogger.Error().Msgf("[%s][Closing MOQT Session][Code - %d]%s", s.Id, code, msg)
 
-	s.Handler.HandleClose()
+		s.Handler.HandleClose()
 
-	sm.removeSession(s)
+		sm.removeSession(s)
+		close(s.Closed)
+	})
+}
+
+func (s *MOQTSession) Done() <-chan struct{} {
+	return s.Closed
 }
 
 func (s *MOQTSession) ServeMOQ() {

@@ -13,17 +13,27 @@ type PubStream struct {
 	Namespace    string
 	TrackName    string
 	Alias        uint64
+	FilterType   uint64
+	StartGroup   uint64
+	StartObject  uint64
+	EndGroup     uint64
+	EndObject    uint64
 	GroupCounter uint64
 }
 
-func NewPubStream(session *MOQTSession, streamid string, subid uint64, ns string, trackname string, alias uint64) *PubStream {
+func NewPubStream(session *MOQTSession, msg *wire.Subscribe) *PubStream {
 	return &PubStream{
 		session:      session,
-		StreamID:     streamid,
-		SubID:        subid,
-		Namespace:    ns,
-		TrackName:    trackname,
-		Alias:        alias,
+		StreamID:     msg.GetStreamID(),
+		SubID:        msg.SubscribeID,
+		Namespace:    msg.TrackNameSpace,
+		TrackName:    msg.TrackName,
+		Alias:        msg.TrackAlias,
+		FilterType:   msg.FilterType,
+		StartGroup:   msg.StartGroup,
+		StartObject:  msg.StartObject,
+		EndGroup:     msg.EndGroup,
+		EndObject:    msg.EndObject,
 		GroupCounter: 0,
 	}
 }

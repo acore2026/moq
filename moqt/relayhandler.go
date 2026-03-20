@@ -74,6 +74,10 @@ func (publisher *RelayHandler) GetObjectStream(msg *wire.Subscribe) (bool, *Rela
 }
 
 func (sub *RelayHandler) ProcessMOQTStream(stream wire.MOQTStream) {
+	sub.ProcessMOQTStreamFrom(stream, 0)
+}
+
+func (sub *RelayHandler) ProcessMOQTStreamFrom(stream wire.MOQTStream, startIndex int) {
 
 	streamid := stream.GetStreamID()
 
@@ -95,7 +99,7 @@ func (sub *RelayHandler) ProcessMOQTStream(stream wire.MOQTStream) {
 	unistream.Write(stream.GetHeaderSubIDBytes(subid))
 	stream.WgDone()
 
-	itr := 0
+	itr := startIndex
 
 	for {
 		itr, err = stream.Pipe(itr, unistream)
@@ -121,6 +125,7 @@ func (publisher *RelayHandler) DoHandle() {
 
 		if err != nil {
 			publisher.Slogger.Error().Msgf("[Error Accepting Unistream][%s]", err)
+			publisher.Close(wire.MOQERR_INTERNAL_ERROR, "[Relay Unistream Closed]")
 			return
 		}
 
@@ -200,10 +205,16 @@ func (subscriber *RelayHandler) HandleSubscribe(msg *wire.Subscribe) {
 		go subscriber.CS.WriteControlMessage(okmsg)
 	}
 
-	rs.AddSubscriber(subscriber)
+	startIndex := rs.AddSubscriber(subscriber, msg)
 
 	subscriber.Slogger.Info().Msgf("[Subscribed to Stream - %s]", rs.GetStreamID())
 	subscriber.SubscribedStreams.AddStream(msg.SubscribeID, rs)
+
+	if isCached {
+		if stream := rs.GetSourceStream(); stream != nil {
+			go subscriber.ProcessMOQTStreamFrom(stream, startIndex)
+		}
+	}
 }
 
 func (subscriber *RelayHandler) HandleAnnounceOk(msg *wire.AnnounceOk) {

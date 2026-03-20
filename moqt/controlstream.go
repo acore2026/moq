@@ -39,6 +39,9 @@ func (cs *ControlStream) WriteControlMessage(msg wire.MOQTMessage) {
 }
 
 func (cs *ControlStream) ServeCS() {
+	defer func() {
+		cs.Close(wire.MOQERR_INTERNAL_ERROR, "[Control Stream Closed]")
+	}()
 
 	reader := quicvarint.NewReader(cs.stream)
 
@@ -144,7 +147,7 @@ func (cs *ControlStream) handleControlMessage(m wire.MOQTMessage) {
 	case wire.UNSUBSCRIBE:
 		cs.Handler.HandleUnsubscribe(m.(*wire.Unsubcribe))
 	default:
-		log.Error().Msgf("Unknown Control Message +v", m)
+		log.Error().Msgf("Unknown Control Message %+v", m)
 	}
 }
 
