@@ -12,6 +12,7 @@ import (
 type DialerOptions struct {
 	QuicConfig *quic.Config
 	ALPNs      []string
+	TLSConfig  *tls.Config
 }
 
 type MOQTDialer struct {
@@ -24,11 +25,15 @@ func (d *MOQTDialer) Dial(addr string) (*MOQTSession, error) {
 
 	Options := d.Options
 
-	tlsConfig := tls.Config{
-		NextProtos: Options.ALPNs,
+	tlsConfig := &tls.Config{}
+
+	if Options.TLSConfig != nil {
+		tlsConfig = Options.TLSConfig.Clone()
 	}
 
-	conn, err := quic.DialAddr(d.Ctx, addr, &tlsConfig, Options.QuicConfig)
+	tlsConfig.NextProtos = Options.ALPNs
+
+	conn, err := quic.DialAddr(d.Ctx, addr, tlsConfig, Options.QuicConfig)
 
 	if err != nil {
 		return nil, err
