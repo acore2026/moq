@@ -44,9 +44,12 @@ func main() {
 		QuicConfig: &quic.Config{
 			EnableDatagrams: true,
 		},
+		EnableMigration: true, // 启用连接迁移
 	}
 
 	sub := api.NewMOQSub(Options, RELAY)
+
+	log.Info().Msg("Connecting with connection migration enabled...")
 
 	handler, err := sub.Connect()
 
