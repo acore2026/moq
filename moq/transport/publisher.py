@@ -88,13 +88,33 @@ class MOQPublisher(MOQClientSession):
                 verify_mode=kwargs.get('verify_mode', ssl.CERT_NONE),
                 alpn_protocols=kwargs.get('alpn_protocols', ["moq-17"]),
             )
-            
+
             # Connect and store context manager
             self._connection_context = connect(host, port, configuration=configuration)
             self._protocol = await self._connection_context.__aenter__()
             self._quic = self._protocol._quic
             self._connection = self._protocol  # Protocol acts as connection
-            
+
+            # Small delay for connection handshake to complete
+            await asyncio.sleep(0.1)
+
+            # Create UNIDIRECTIONAL stream for sending to server
+            stream_result = self._connection.create_stream(is_unidirectional=True)
+            if asyncio.iscoroutine(stream_result):
+                send_reader, send_writer = await stream_result
+            else:
+                send_reader, send_writer = stream_result
+
+            # Create BIDIRECTIONAL stream for receiving from server
+            stream_result = self._connection.create_stream(is_unidirectional=False)
+            if asyncio.iscoroutine(stream_result):
+                recv_reader, recv_writer = await stream_result
+            else:
+                recv_reader, recv_writer = stream_result
+
+            self._send_stream = send_writer
+            self._recv_stream = recv_reader
+
             # Perform setup (this sets is_setup = True)
             await self._perform_setup()
             

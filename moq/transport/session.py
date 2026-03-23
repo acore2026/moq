@@ -114,11 +114,46 @@ class MOQSession:
         """Send a MOQ control message"""
         if not self._control_stream:
             raise RuntimeError("Control stream not established")
-        
+
         try:
             data = message.encode()
-            self._control_stream.write(data)
-            await self._control_stream.drain()
+
+            # Try different write methods depending on stream type
+            if hasattr(self._control_stream, 'write'):
+                # It's a StreamWriter
+                self._control_stream.write(data)
+                await self._control_stream.drain()
+            elif hasattr(self._control_stream, 'send'):
+                # It's a QuicStream sender
+                self._control_stream.send(data)
+            else:
+                # Fallback: use QUIC connection directly
+                quic = self._quic if hasattr(self, '_quic') else None
+                if quic and hasattr(quic, 'send_stream_data'):
+                    # Find stream ID by checking which stream matches _control_stream
+                    stream_id = None
+                    for sid, stream in quic._streams.items():
+                        if stream == self._control_stream or \
+                           (hasattr(self._control_stream, 'stream_id') and stream.stream_id == self._control_stream.stream_id):
+                            stream_id = sid
+                            break
+                    
+                    if stream_id is not None:
+                        quic.send_stream_data(stream_id, data, end_stream=False)
+                        logger.debug(f"Sent {len(data)} bytes on stream {stream_id}")
+                    else:
+                        raise RuntimeError("Could not find stream ID for sending")
+
+            # Trigger transmission via protocol
+            if self._connection:
+                if hasattr(self._connection, 'transmit'):
+                    self._connection.transmit()
+                elif hasattr(self._connection, '_transmit_soon'):
+                    self._connection._transmit_soon()
+
+            # Give time for transmission
+            await asyncio.sleep(0.05)
+
             logger.debug(f"Sent message: {type(message).__name__}")
         except Exception as e:
             logger.error(f"Failed to send message: {e}")
@@ -206,30 +241,40 @@ class MOQClientSession(MOQSession):
         """Send CLIENT_SETUP message"""
         if not self._connection:
             raise RuntimeError("No connection available")
-        
-        # Create control stream (aioquic returns a reader/writer tuple)
+
+        # Create control stream
         stream_result = self._connection.create_stream()
         if asyncio.iscoroutine(stream_result):
             reader, writer = await stream_result
         else:
             reader, writer = stream_result
-        
+
         self._control_stream = writer
         self._control_reader = reader
-        
+
         # Send setup message
         setup = ClientSetupMessage(
             versions=[self.config.version],
             role=self.config.role
         )
-        
+
         await self.send_message(setup)
         logger.info("Sent CLIENT_SETUP message")
-        
+
         # Wait for SERVER_SETUP response
-        response = await self._control_reader.read()
+        logger.info("Waiting for SERVER_SETUP response...")
+        try:
+            response = await asyncio.wait_for(self._control_reader.read(), timeout=10.0)
+        except asyncio.TimeoutError:
+            logger.error("Timeout waiting for SERVER_SETUP")
+            raise RuntimeError("Timeout waiting for SERVER_SETUP")
+
+        if not response:
+            logger.error("Empty response from server")
+            raise RuntimeError("Empty response from server")
+
         message, _ = decode_message(response)
-        
+
         if message and message.msg_type == MOQMessageType.SERVER_SETUP:
             self._is_setup = True
             logger.info(f"Session setup complete, version={hex(message.selected_version)}")
@@ -251,39 +296,56 @@ class MOQServerSession(MOQSession):
         """Handle CLIENT_SETUP and respond with SERVER_SETUP"""
         if not self._connection:
             raise RuntimeError("No connection available")
-        
-        # Wait for control stream (created by client)
-        # Server waits for incoming stream
+
+        logger.info("Server accepting client control stream...")
+
+        # Wait for the client to create its stream and send data
+        await asyncio.sleep(0.5)
+
+        # Create a bidirectional stream - server creates its own stream
+        # In QUIC, bidirectional streams are separate - server creates stream 1
+        logger.info("Creating server control stream...")
         stream_result = self._connection.create_stream()
         if asyncio.iscoroutine(stream_result):
             reader, writer = await stream_result
         else:
             reader, writer = stream_result
-        
+
         self._control_stream = writer
         self._control_reader = reader
-        
-        # Read CLIENT_SETUP
-        data = await self._control_reader.read()
+
+        logger.info("Server reading CLIENT_SETUP...")
+
+        # Read CLIENT_SETUP with timeout
+        try:
+            data = await asyncio.wait_for(self._control_reader.read(), timeout=5.0)
+        except asyncio.TimeoutError:
+            raise RuntimeError("Timeout waiting for CLIENT_SETUP")
+
+        if not data:
+            raise RuntimeError("No data received from client")
+
         message, _ = decode_message(data)
-        
+
         if message and message.msg_type == MOQMessageType.CLIENT_SETUP:
+            logger.info(f"Received CLIENT_SETUP: versions={[hex(v) for v in message.versions]}")
+
             # Select version
             selected_version = None
             for v in message.versions:
                 if v == self.config.version:
                     selected_version = v
                     break
-            
+
             if selected_version is None:
                 raise RuntimeError("No compatible version found")
-            
+
             # Send SERVER_SETUP
             response = ServerSetupMessage(
                 selected_version=selected_version,
                 role=MOQRole.PUB_SUB  # Relay acts as both
             )
-            
+
             await self.send_message(response)
             self._is_setup = True
             logger.info(f"Session setup complete, version={hex(selected_version)}")

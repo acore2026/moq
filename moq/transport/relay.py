@@ -88,18 +88,113 @@ class RelayConfig:
     key_path: Optional[str] = None   # Path to SSL private key
 
 
-class MOQRelay(MOQServerSession):
+class RelayClientSession(MOQServerSession):
+    """Session handler for each incoming client connection"""
+
+    def __init__(self, relay: 'MOQRelay', connection_id: str):
+        super().__init__(relay.config)
+        self._relay = relay
+        self._connection_id = connection_id
+
+        # Register message handlers
+        self.register_message_handler(MOQMessageType.ANNOUNCE, self._handle_announce)
+        self.register_message_handler(MOQMessageType.UNANNOUNCE, self._handle_unannounce)
+        self.register_message_handler(MOQMessageType.SUBSCRIBE, self._handle_subscribe)
+
+    async def _handle_streams(self) -> None:
+        """Handle incoming streams - server just waits for client streams"""
+        logger.info(f"Server stream handler started for {self._connection_id}")
+        try:
+            while not self._is_closed:
+                await asyncio.sleep(1)
+        except asyncio.CancelledError:
+            logger.info(f"Server stream handler cancelled for {self._connection_id}")
+            raise
+
+    async def _perform_setup_with_data(self, data: bytes) -> None:
+        """Perform setup when CLIENT_SETUP data is already received"""
+        from moq.protocol.messages import decode_message, ServerSetupMessage
+        from moq.protocol.constants import MOQMessageType, MOQRole
+
+        logger.info(f"Processing CLIENT_SETUP data ({len(data)} bytes)")
+
+        message, _ = decode_message(data)
+
+        if message and message.msg_type == MOQMessageType.CLIENT_SETUP:
+            logger.info(f"Received CLIENT_SETUP: versions={[hex(v) for v in message.versions]}")
+
+            # Select version
+            selected_version = None
+            for v in message.versions:
+                if v == self.config.version:
+                    selected_version = v
+                    break
+
+            if selected_version is None:
+                raise RuntimeError("No compatible version found")
+
+            # Send SERVER_SETUP
+            response = ServerSetupMessage(
+                selected_version=selected_version,
+                role=MOQRole.PUB_SUB
+            )
+
+            await self.send_message(response)
+            self._is_setup = True
+            logger.info(f"Session setup complete, version={hex(selected_version)}")
+
+            # IMPORTANT: Explicitly trigger transmission
+            protocol = self._relay._connections.get(self._connection_id)
+            if protocol and hasattr(protocol, 'transmit'):
+                protocol.transmit()
+                logger.info("Explicitly triggered transmission")
+
+            # Give time for response to be transmitted over the network
+            await asyncio.sleep(1.0)
+
+            # Start stream handler
+            asyncio.create_task(self._handle_streams())
+        else:
+            raise RuntimeError(f"Unexpected setup message: {message}")
+
+    async def _handle_announce(self, message: AnnounceMessage) -> None:
+        """Handle ANNOUNCE message from client"""
+        await self._relay._handle_announce(message, self._connection_id)
+        # Send ANNOUNCE_OK response
+        response = AnnounceOkMessage(track_namespace=message.track_namespace)
+        await self.send_message(response)
+
+    async def _handle_unannounce(self, message: UnannounceMessage) -> None:
+        """Handle UNANNOUNCE message from client"""
+        await self._relay._handle_unannounce(message, self._connection_id)
+
+    async def _handle_subscribe(self, message: SubscribeMessage) -> None:
+        """Handle SUBSCRIBE message from client"""
+        await self._relay._handle_subscribe(message, self._connection_id)
+        # For now, always send SUBSCRIBE_OK
+        # In a full implementation, this would check if track exists
+        response = SubscribeOkMessage(
+            subscribe_id=message.subscribe_id,
+            expires=0,
+            group_order=0,
+            content_exists=False,
+            track_alias=message.track_alias
+        )
+        await self.send_message(response)
+
+
+class MOQRelay:
+    """MOQ Relay that manages multiple client connections"""
+    
     def __init__(
         self,
         session_config: Optional[SessionConfig] = None,
         relay_config: Optional[RelayConfig] = None,
         on_event: Optional[Callable[[str, Any], None]] = None
     ):
-        session_config = session_config or SessionConfig()
-        session_config.role = MOQRole.PUB_SUB
-        session_config.enable_cache = True
-        
-        super().__init__(session_config)
+        self.config = session_config or SessionConfig()
+        self.config.role = MOQRole.PUB_SUB
+        self.config.enable_cache = True
         
         self.relay_config = relay_config or RelayConfig()
         self._on_event = on_event
@@ -109,25 +204,119 @@ class MOQRelay(MOQServerSession):
         self._subscriptions_by_track: Dict[str, List[MOQSubscription]] = {}
         self._connections: Dict[str, Any] = {}
         self._server: Optional[Any] = None
-        
-        self.register_message_handler(MOQMessageType.ANNOUNCE, self._handle_announce)
-        self.register_message_handler(MOQMessageType.UNANNOUNCE, self._handle_unannounce)
-        self.register_message_handler(MOQMessageType.SUBSCRIBE, self._handle_subscribe)
+        self._sessions: Dict[str, RelayClientSession] = {}
+        self._connection_counter: int = 0
         
         logger.info("MOQRelay initialized")
     
+    async def initialize(self) -> None:
+        """Initialize relay components"""
+        from moq.cache.manager import MOQCacheManager
+        if self.config.enable_cache:
+            self.cache_manager = MOQCacheManager(
+                memory_cache_size=self.config.max_cache_memory,
+                disk_cache_size=self.config.max_cache_disk,
+                disk_cache_dir=self.config.cache_dir,
+                use_disk_cache=True
+            )
+            await self.cache_manager.initialize()
+            logger.info("Relay cache manager initialized")
+    
+    async def close(self) -> None:
+        """Close relay and cleanup"""
+        logger.info("Closing relay")
+        # Close all sessions
+        for session_id, session in list(self._sessions.items()):
+            try:
+                await session.close()
+            except Exception as e:
+                logger.error(f"Error closing session {session_id}: {e}")
+        self._sessions.clear()
+        
+        # Close cache manager
+        if hasattr(self, 'cache_manager') and self.cache_manager:
+            await self.cache_manager.close()
+        
+        logger.info("Relay closed")
+    
+    async def _handle_connection(self, connection_id: str, protocol, quic) -> None:
+        """Handle an incoming client connection - now handled via protocol events"""
+        # Connection handling is now done through protocol.quic_event_received
+        # This method is kept for backwards compatibility but doesn't do anything
+        pass
+    
     def _create_protocol(self, *args, **kwargs):
         """Create protocol handler for incoming connections"""
-        from aioquic.asyncio.protocol import QuicConnectionProtocol
+        from aioquic.asyncio.protocol import QuicConnectionProtocol, QuicStreamAdapter
+        from aioquic.quic import events
+        relay = self
         
         class RelayProtocol(QuicConnectionProtocol):
             def __init__(self, *args, **kwargs):
                 super().__init__(*args, **kwargs)
-                self.relay = self
+                self._relay = relay
+                self._connection_id = None
+                self._session = None
+            
+            def connection_made(self, transport):
+                super().connection_made(transport)
+                self._connection_id = f"conn_{relay._connection_counter}"
+                relay._connection_counter += 1
+                relay._connections[self._connection_id] = self
+                logger.info(f"New connection: {self._connection_id}")
+                
+                # Create session for this connection
+                self._session = RelayClientSession(relay, self._connection_id)
+                relay._sessions[self._connection_id] = self._session
+                self._session._connection = self
+                self._session._quic = self._quic
+                
+                # Set up stream handler
+                self._stream_handler = self._handle_new_stream
+                logger.info(f"Stream handler set: {self._stream_handler is not None}")
             
             def quic_event_received(self, event):
-                # Handle QUIC events
-                pass
+                """Handle QUIC events"""
+                from aioquic.quic import events
+                if isinstance(event, events.StreamDataReceived):
+                    logger.info(f"DEBUG: StreamDataReceived for stream {event.stream_id}, {len(event.data)} bytes")
+                super().quic_event_received(event)
+            
+            def _handle_new_stream(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+                """Handle a new stream - called by aioquic when stream data arrives"""
+                logger.info(f"New stream handler called for connection {self._connection_id}")
+                
+                # Get stream ID from writer
+                stream_id = writer.get_extra_info("stream_id")
+                logger.info(f"Handling stream {stream_id}")
+                
+                # Set up session streams
+                self._session._control_stream = writer
+                self._session._control_reader = reader
+                
+                # Handle the stream data asynchronously
+                asyncio.create_task(self._handle_stream(reader, writer))
+            
+            async def _handle_stream(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+                """Handle stream data"""
+                try:
+                    # Read the CLIENT_SETUP message (don't read to EOF, just get the available data)
+                    # MOQ messages have a length prefix, so we need to read at least that
+                    # For now, read a reasonable amount
+                    data = await reader.read(1024)  # Read up to 1KB, don't wait for EOF
+                    if data:
+                        logger.info(f"Received {len(data)} bytes on stream")
+                        await self._session._perform_setup_with_data(data)
+                except Exception as e:
+                    logger.error(f"Error handling stream: {e}")
+                    import traceback
+                    traceback.print_exc()
+            
+            def connection_lost(self, exc):
+                if self._connection_id and self._connection_id in relay._connections:
+                    del relay._connections[self._connection_id]
+                logger.info(f"Connection lost: {self._connection_id}")
+                super().connection_lost(exc)
         
         return RelayProtocol(*args, **kwargs)
     
@@ -191,25 +380,6 @@ class MOQRelay(MOQServerSession):
         
         await self.close()
         logger.info("Relay stopped")
-    
-    async def _handle_announce(self, message: AnnounceMessage, session_id: str = "") -> None:
-        namespace = message.track_namespace
-        
-        if namespace in self._announced_namespaces:
-            response = AnnounceErrorMessage(
-                track_namespace=namespace,
-                error_code=0x0200,
-                reason="Namespace already announced"
-            )
-            logger.warning(f"Namespace already announced: {namespace}")
-        else:
-            announcement = MOQAnnouncement(namespace=namespace, state="active")
-            self._announced_namespaces[namespace] = announcement
-            response = AnnounceOkMessage(track_namespace=namespace)
-            logger.info(f"Namespace announced: {namespace}")
-        
-        if self._on_event:
-            self._on_event("announce", {"namespace": namespace, "session_id": session_id})
     
     async def _handle_unannounce(self, message: UnannounceMessage, session_id: str = "") -> None:
         namespace = message.track_namespace

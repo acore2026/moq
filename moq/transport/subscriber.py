@@ -100,7 +100,10 @@ class MOQSubscriber(MOQClientSession):
             self._protocol = await self._connection_context.__aenter__()
             self._quic = self._protocol._quic
             self._connection = self._protocol  # Protocol acts as connection
-            
+
+            # Small delay for connection handshake to complete
+            await asyncio.sleep(0.1)
+
             # Perform setup (this sets is_setup = True)
             await self._perform_setup()
             
