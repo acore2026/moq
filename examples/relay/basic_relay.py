@@ -53,22 +53,24 @@ async def main():
     print(f"Relay started on {relay_config.host}:{relay_config.port}")
     print("Press Ctrl+C to stop")
     
-    # Setup signal handler
-    loop = asyncio.get_event_loop()
+    # Setup signal handler (cross-platform)
+    shutdown_event = asyncio.Event()
     
-    def signal_handler():
+    def signal_handler(signum, frame):
         print("\nShutting down...")
-        asyncio.create_task(relay.stop())
+        shutdown_event.set()
     
-    for sig in (signal.SIGINT, signal.SIGTERM):
-        loop.add_signal_handler(sig, signal_handler)
+    signal.signal(signal.SIGINT, signal_handler)
+    signal.signal(signal.SIGTERM, signal_handler)
     
     # Print stats periodically
     try:
-        while True:
-            await asyncio.sleep(10)
-            stats = await relay.get_stats()
-            print(f"Relay stats: {stats}")
+        while not shutdown_event.is_set():
+            try:
+                await asyncio.wait_for(shutdown_event.wait(), timeout=10)
+            except asyncio.TimeoutError:
+                stats = await relay.get_stats()
+                print(f"Relay stats: {stats}")
     except asyncio.CancelledError:
         pass
     
