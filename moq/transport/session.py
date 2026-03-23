@@ -191,6 +191,17 @@ class MOQClientSession(MOQSession):
     ):
         super().__init__(config, on_message)
     
+    async def _handle_streams(self) -> None:
+        """Handle incoming QUIC streams - keep connection alive"""
+        logger.info("Client stream handler started")
+        try:
+            while not self._is_closed:
+                # Keep connection alive - actual stream handling would go here
+                await asyncio.sleep(1)
+        except asyncio.CancelledError:
+            logger.info("Client stream handler cancelled")
+            raise
+    
     async def _perform_setup(self) -> None:
         """Send CLIENT_SETUP message"""
         if not self._connection:

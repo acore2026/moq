@@ -5,8 +5,12 @@ Handles subscribing to and receiving media streams
 
 import asyncio
 import logging
+import ssl
 from typing import Optional, Callable, Any, AsyncIterator
 from dataclasses import dataclass
+
+from aioquic.asyncio.client import connect
+from aioquic.quic.configuration import QuicConfiguration
 
 from moq.protocol.constants import (
     MOQMessageType, MOQRole, MOQFilterType
@@ -72,7 +76,7 @@ class MOQSubscriber(MOQClientSession):
     
     async def connect(self, host: str, port: int, **kwargs) -> None:
         """
-        Connect to relay server.
+        Connect to relay server using QUIC.
         
         Args:
             host: Relay hostname or IP
@@ -84,11 +88,55 @@ class MOQSubscriber(MOQClientSession):
             self._port = port
             logger.info(f"Connecting to relay at {host}:{port}")
             
-            # TODO: Implement actual QUIC connection
+            # Create QUIC configuration
+            configuration = QuicConfiguration(
+                is_client=True,
+                verify_mode=kwargs.get('verify_mode', ssl.CERT_NONE),
+                alpn_protocols=kwargs.get('alpn_protocols', ["moq-17"]),
+            )
+            
+            # Connect and store context manager
+            self._connection_context = connect(host, port, configuration=configuration)
+            self._protocol = await self._connection_context.__aenter__()
+            self._quic = self._protocol._quic
+            
+            # Perform setup (this sets is_setup = True)
+            await self._perform_setup()
+            
+            # Start connection handler in background
+            self._connection_task = asyncio.create_task(
+                self._handle_connection_loop(),
+                name=f"subscriber-connection-{host}:{port}"
+            )
+            
+            logger.info(f"Connected and session established with {host}:{port}")
             
         except Exception as e:
             logger.error(f"Connection failed: {e}")
             raise
+    
+    async def _handle_connection_loop(self) -> None:
+        """Handle incoming streams in the background"""
+        try:
+            await self._handle_streams()
+        except Exception as e:
+            logger.error(f"Connection handler error: {e}")
+        finally:
+            await self.close()
+    
+    async def disconnect(self) -> None:
+        """Disconnect from relay"""
+        if self._connection_task and not self._connection_task.done():
+            self._connection_task.cancel()
+            try:
+                await self._connection_task
+            except asyncio.CancelledError:
+                pass
+        
+        if hasattr(self, '_connection_context') and self._connection_context:
+            await self._connection_context.__aexit__(None, None, None)
+        
+        await self.close()
     
     async def subscribe(
         self,

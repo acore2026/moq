@@ -5,8 +5,12 @@ Routes media streams between publishers and subscribers with caching
 
 import asyncio
 import logging
+import ssl
 from typing import Optional, Dict, List, Callable, Any
 from dataclasses import dataclass
+
+from aioquic.asyncio.server import serve
+from aioquic.quic.configuration import QuicConfiguration
 
 from moq.protocol.constants import MOQMessageType, MOQRole
 from moq.protocol.messages import (
@@ -56,12 +60,43 @@ class MOQRelay(MOQServerSession):
         
         logger.info("MOQRelay initialized")
     
+    def _create_protocol(self, *args, **kwargs):
+        """Create protocol handler for incoming connections"""
+        from aioquic.asyncio.protocol import QuicConnectionProtocol
+        
+        class RelayProtocol(QuicConnectionProtocol):
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args, **kwargs)
+                self.relay = self
+            
+            def quic_event_received(self, event):
+                # Handle QUIC events
+                pass
+        
+        return RelayProtocol(*args, **kwargs)
+    
     async def start(self, host: Optional[str] = None, port: Optional[int] = None) -> None:
         host = host or self.relay_config.host
         port = port or self.relay_config.port
         
         logger.info(f"Starting relay on {host}:{port}")
         await self.initialize()
+        
+        # Create QUIC server configuration
+        configuration = QuicConfiguration(
+            is_client=False,
+            verify_mode=ssl.CERT_NONE,
+            alpn_protocols=["moq-17"],
+        )
+        
+        # Start QUIC server
+        self._server = await serve(
+            host,
+            port,
+            configuration=configuration,
+            create_protocol=self._create_protocol,
+        )
+        
         logger.info(f"Relay started on {host}:{port}")
     
     async def stop(self) -> None:
@@ -75,7 +110,8 @@ class MOQRelay(MOQServerSession):
         self._connections.clear()
         if self._server:
             self._server.close()
-            await self._server.wait_closed()
+            # Wait a moment for server to close
+            await asyncio.sleep(0.1)
         
         await self.close()
         logger.info("Relay stopped")
