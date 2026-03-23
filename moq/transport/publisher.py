@@ -93,6 +93,7 @@ class MOQPublisher(MOQClientSession):
             self._connection_context = connect(host, port, configuration=configuration)
             self._protocol = await self._connection_context.__aenter__()
             self._quic = self._protocol._quic
+            self._connection = self._protocol  # Protocol acts as connection
             
             # Perform setup (this sets is_setup = True)
             await self._perform_setup()

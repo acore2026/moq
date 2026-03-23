@@ -207,8 +207,15 @@ class MOQClientSession(MOQSession):
         if not self._connection:
             raise RuntimeError("No connection available")
         
-        # Create control stream
-        self._control_stream = self._connection.create_stream()
+        # Create control stream (aioquic returns a reader/writer tuple)
+        stream_result = self._connection.create_stream()
+        if asyncio.iscoroutine(stream_result):
+            reader, writer = await stream_result
+        else:
+            reader, writer = stream_result
+        
+        self._control_stream = writer
+        self._control_reader = reader
         
         # Send setup message
         setup = ClientSetupMessage(
@@ -220,7 +227,7 @@ class MOQClientSession(MOQSession):
         logger.info("Sent CLIENT_SETUP message")
         
         # Wait for SERVER_SETUP response
-        response = await self._control_stream.read()
+        response = await self._control_reader.read()
         message, _ = decode_message(response)
         
         if message and message.msg_type == MOQMessageType.SERVER_SETUP:
@@ -245,12 +252,19 @@ class MOQServerSession(MOQSession):
         if not self._connection:
             raise RuntimeError("No connection available")
         
-        # Wait for control stream
-        stream_reader = self._connection.create_stream()
-        self._control_stream = stream_reader
+        # Wait for control stream (created by client)
+        # Server waits for incoming stream
+        stream_result = self._connection.create_stream()
+        if asyncio.iscoroutine(stream_result):
+            reader, writer = await stream_result
+        else:
+            reader, writer = stream_result
+        
+        self._control_stream = writer
+        self._control_reader = reader
         
         # Read CLIENT_SETUP
-        data = await stream_reader.read()
+        data = await self._control_reader.read()
         message, _ = decode_message(data)
         
         if message and message.msg_type == MOQMessageType.CLIENT_SETUP:

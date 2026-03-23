@@ -5,7 +5,9 @@ Routes media streams between publishers and subscribers with caching
 
 import asyncio
 import logging
+import os
 import ssl
+import tempfile
 from typing import Optional, Dict, List, Callable, Any
 from dataclasses import dataclass
 
@@ -23,6 +25,58 @@ from moq.transport.session import MOQSession, SessionConfig, MOQServerSession
 logger = logging.getLogger(__name__)
 
 
+def generate_self_signed_cert(cert_path: str, key_path: str) -> None:
+    """Generate self-signed certificate for development/testing"""
+    from cryptography import x509
+    from cryptography.x509.oid import NameOID
+    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.hazmat.primitives.asymmetric import rsa
+    import datetime
+
+    # Generate private key
+    key = rsa.generate_private_key(
+        public_exponent=65537,
+        key_size=2048,
+    )
+
+    # Generate certificate
+    subject = issuer = x509.Name([
+        x509.NameAttribute(NameOID.COUNTRY_NAME, u"US"),
+        x509.NameAttribute(NameOID.STATE_OR_PROVINCE_NAME, u"CA"),
+        x509.NameAttribute(NameOID.LOCALITY_NAME, u"San Francisco"),
+        x509.NameAttribute(NameOID.ORGANIZATION_NAME, u"MOQ Relay"),
+        x509.NameAttribute(NameOID.COMMON_NAME, u"localhost"),
+    ])
+
+    cert = x509.CertificateBuilder().subject_name(
+        subject
+    ).issuer_name(
+        issuer
+    ).public_key(
+        key.public_key()
+    ).serial_number(
+        x509.random_serial_number()
+    ).not_valid_before(
+        datetime.datetime.utcnow()
+    ).not_valid_after(
+        datetime.datetime.utcnow() + datetime.timedelta(days=365)
+    ).add_extension(
+        x509.SubjectAlternativeName([x509.DNSName(u"localhost")]),
+        critical=False,
+    ).sign(key, hashes.SHA256())
+
+    # Write certificate and key to files
+    with open(cert_path, "wb") as f:
+        f.write(cert.public_bytes(serialization.Encoding.PEM))
+
+    with open(key_path, "wb") as f:
+        f.write(key.private_bytes(
+            encoding=serialization.Encoding.PEM,
+            format=serialization.PrivateFormat.TraditionalOpenSSL,
+            encryption_algorithm=serialization.NoEncryption()
+        ))
+
+
 @dataclass
 class RelayConfig:
     host: str = "0.0.0.0"
@@ -30,6 +84,8 @@ class RelayConfig:
     max_connections: int = 1000
     max_subscriptions_per_track: int = 100
     cache_enabled: bool = True
+    cert_path: Optional[str] = None  # Path to SSL certificate
+    key_path: Optional[str] = None   # Path to SSL private key
 
 
 class MOQRelay(MOQServerSession):
@@ -82,12 +138,32 @@ class MOQRelay(MOQServerSession):
         logger.info(f"Starting relay on {host}:{port}")
         await self.initialize()
         
-        # Create QUIC server configuration
+        # Handle SSL certificates
+        if self.relay_config.cert_path and self.relay_config.key_path:
+            # Use provided certificates
+            cert_path = self.relay_config.cert_path
+            key_path = self.relay_config.key_path
+        else:
+            # Generate self-signed certificates for development
+            cert_dir = tempfile.gettempdir()
+            cert_path = os.path.join(cert_dir, "moq_relay_cert.pem")
+            key_path = os.path.join(cert_dir, "moq_relay_key.pem")
+            
+            if not os.path.exists(cert_path) or not os.path.exists(key_path):
+                logger.info("Generating self-signed SSL certificate for development")
+                generate_self_signed_cert(cert_path, key_path)
+                logger.info(f"Certificate saved to: {cert_path}")
+        
+        # Create QUIC server configuration with certificates
         configuration = QuicConfiguration(
             is_client=False,
             verify_mode=ssl.CERT_NONE,
             alpn_protocols=["moq-17"],
         )
+        configuration.load_cert_chain(cert_path, key_path)
+        
+        # Store cert paths for client reference
+        self._cert_path = cert_path
         
         # Start QUIC server
         self._server = await serve(
