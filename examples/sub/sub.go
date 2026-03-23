@@ -1,10 +1,7 @@
 package main
 
 import (
-	"crypto/tls"
-	"crypto/x509"
 	"flag"
-	"fmt"
 	"io"
 	"net/http"
 	"os"
@@ -21,12 +18,7 @@ import (
 )
 
 var ALPNS = []string{"moq-00"} // Application Layer Protocols ["H3" - WebTransport]
-const (
-	RELAY    = "localhost:4443"
-	CERTPATH = "./examples/certs/localhost.crt"
-	NS       = "bbb"
-	TRACK    = "demo"
-)
+const RELAY = "127.0.0.1:4443"
 
 func main() {
 	go func() {
@@ -51,22 +43,19 @@ func main() {
 		ALPNs: ALPNS,
 		QuicConfig: &quic.Config{
 			EnableDatagrams: true,
-			KeepAlivePeriod: 2 * time.Second,
 		},
-		TLSConfig:                 mustLoadTLSConfig(CERTPATH),
-		EnableConnectionMigration: true,
 	}
 
 	sub := api.NewMOQSub(Options, RELAY)
 
-	_, err := sub.Connect()
+	handler, err := sub.Connect()
 
 	sub.OnStream(func(ss moqt.SubStream) {
 		go handleStream(&ss)
 	})
 
 	sub.OnAnnounce(func(ns string) {
-		sub.Subscribe(ns, TRACK, 0)
+		handler.Subscribe(ns, "dumeel", 0)
 	})
 
 	if err != nil {
@@ -74,26 +63,9 @@ func main() {
 		return
 	}
 
-	sub.Subscribe(NS, TRACK, 0)
+	handler.Subscribe("bbb", "dumeel", 0)
 
 	<-sub.Ctx.Done()
-}
-
-func mustLoadTLSConfig(certPath string) *tls.Config {
-	certPEM, err := os.ReadFile(certPath)
-	if err != nil {
-		panic(fmt.Sprintf("read cert %s: %v", certPath, err))
-	}
-
-	pool := x509.NewCertPool()
-	if !pool.AppendCertsFromPEM(certPEM) {
-		panic(fmt.Sprintf("append cert %s: invalid pem", certPath))
-	}
-
-	return &tls.Config{
-		RootCAs:    pool,
-		ServerName: "localhost",
-	}
 }
 
 func handleStream(ss *moqt.SubStream) {

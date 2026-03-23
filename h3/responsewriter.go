@@ -19,7 +19,7 @@ type ResponseWriter struct {
 func NewResponseWriter(stream quic.Stream) *ResponseWriter {
 	return &ResponseWriter{
 		stream:         stream,
-		bufferedStream: bufio.NewWriter(stream),
+		bufferedStream: bufio.NewWriter(&stream),
 		header:         http.Header{},
 	}
 }

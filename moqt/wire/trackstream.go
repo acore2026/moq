@@ -106,11 +106,9 @@ func (ts *TrackStream) GetHeaderSubIDBytes(subid uint64) []byte {
 	return data
 }
 
-func (ts *TrackStream) Pipe(index int, stream quic.SendStream) (int, error) {
+func (ts *TrackStream) Pipe(index int, stream *quic.SendStream) (int, error) {
 	ts.ObjectCond.L.Lock()
-	for index >= len(ts.ObjectsArr) && !ts.IsEOF {
-		ts.ObjectCond.Wait()
-	}
+	ts.ObjectCond.Wait()
 
 	length := len(ts.ObjectsArr)
 
@@ -129,7 +127,7 @@ func (ts *TrackStream) Pipe(index int, stream quic.SendStream) (int, error) {
 		return index, err
 	}
 
-	if ts.IsEOF == true && index >= len(ts.ObjectsArr) {
+	if ts.IsEOF == true {
 		return index, io.EOF
 	}
 

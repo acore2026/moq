@@ -10,11 +10,8 @@ import (
 )
 
 type DialerOptions struct {
-	QuicConfig                *quic.Config
-	ALPNs                     []string
-	TLSConfig                 *tls.Config
-	EnableConnectionMigration bool
-	PathMigrationPollInterval time.Duration
+	QuicConfig *quic.Config
+	ALPNs      []string
 }
 
 type MOQTDialer struct {
@@ -24,26 +21,14 @@ type MOQTDialer struct {
 }
 
 func (d *MOQTDialer) Dial(addr string) (*MOQTSession, error) {
+
 	Options := d.Options
 
-	tlsConfig := &tls.Config{}
-
-	if Options.TLSConfig != nil {
-		tlsConfig = Options.TLSConfig.Clone()
+	tlsConfig := tls.Config{
+		NextProtos: Options.ALPNs,
 	}
 
-	tlsConfig.NextProtos = Options.ALPNs
-
-	var (
-		conn quic.Connection
-		err  error
-	)
-
-	if Options.EnableConnectionMigration {
-		conn, err = dialMigratableConn(d.Ctx, addr, tlsConfig, Options.QuicConfig, Options.PathMigrationPollInterval)
-	} else {
-		conn, err = quic.DialAddr(d.Ctx, addr, tlsConfig, Options.QuicConfig)
-	}
+	conn, err := quic.DialAddr(d.Ctx, addr, &tlsConfig, Options.QuicConfig)
 
 	if err != nil {
 		return nil, err

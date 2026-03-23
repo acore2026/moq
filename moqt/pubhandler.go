@@ -47,7 +47,7 @@ func (pub *PubHandler) HandleSubscribe(msg *wire.Subscribe) {
 
 	if smap, ok := pub.AnnouncedStreams[ns]; ok {
 
-		pubstream := NewPubStream(pub.MOQTSession, msg)
+		pubstream := NewPubStream(pub.MOQTSession, msg.GetStreamID(), msg.SubscribeID, msg.TrackNameSpace, msg.TrackName, msg.TrackAlias)
 		smap.AddStream(msg.SubscribeID, pubstream)
 
 		pub.SubscribeChan <- *pubstream

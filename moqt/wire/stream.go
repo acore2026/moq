@@ -15,7 +15,7 @@ type MOQTStream interface {
 	SetStreamID(string)
 	GetStreamID() string
 	GetHeaderSubIDBytes(uint64) []byte
-	Pipe(int, quic.SendStream) (int, error)
+	Pipe(int, *quic.SendStream) (int, error)
 	SetReader(reader quicvarint.Reader)
 	WgAdd()
 	WgWait()

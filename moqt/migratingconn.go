@@ -15,7 +15,7 @@ import (
 const defaultPathMigrationPollInterval = 2 * time.Second
 
 type migratingClientConn struct {
-	quic.Connection
+	*quic.Conn
 
 	ctx        context.Context
 	cancel     context.CancelFunc
@@ -32,7 +32,7 @@ type migratingClientConn struct {
 	closeOnce sync.Once
 }
 
-func dialMigratableConn(ctx context.Context, addr string, tlsConfig *tls.Config, quicConfig *quic.Config, pollInterval time.Duration) (quic.Connection, error) {
+func dialMigratableConn(ctx context.Context, addr string, tlsConfig *tls.Config, quicConfig *quic.Config, pollInterval time.Duration) (*quic.Conn, error) {
 	remoteAddr, err := net.ResolveUDPAddr("udp", addr)
 	if err != nil {
 		return nil, err
@@ -55,7 +55,7 @@ func dialMigratableConn(ctx context.Context, addr string, tlsConfig *tls.Config,
 
 	monitorCtx, cancel := context.WithCancel(context.Background())
 	mc := &migratingClientConn{
-		Connection:   conn,
+		Conn:         conn,
 		ctx:          monitorCtx,
 		cancel:       cancel,
 		remoteAddr:   remoteAddr,
@@ -67,7 +67,7 @@ func dialMigratableConn(ctx context.Context, addr string, tlsConfig *tls.Config,
 	go mc.monitorPathChanges()
 	go mc.closeOnConnectionDone()
 
-	return mc, nil
+	return mc.Conn, nil
 }
 
 func newMigrationTransport(remoteAddr *net.UDPAddr) (*quic.Transport, string, error) {
@@ -112,7 +112,7 @@ func (mc *migratingClientConn) monitorPathChanges() {
 		select {
 		case <-mc.ctx.Done():
 			return
-		case <-mc.Connection.Context().Done():
+		case <-mc.Conn.Context().Done():
 			return
 		case <-ticker.C:
 		}
@@ -149,7 +149,7 @@ func (mc *migratingClientConn) switchPath(sourceIP string) error {
 		return err
 	}
 
-	path, err := mc.Connection.AddPath(transport)
+	path, err := mc.Conn.AddPath(transport)
 	if err != nil {
 		transport.Close()
 		return err
@@ -178,12 +178,12 @@ func (mc *migratingClientConn) switchPath(sourceIP string) error {
 }
 
 func (mc *migratingClientConn) closeOnConnectionDone() {
-	<-mc.Connection.Context().Done()
+	<-mc.Conn.Context().Done()
 	mc.shutdown()
 }
 
 func (mc *migratingClientConn) CloseWithError(code quic.ApplicationErrorCode, msg string) error {
-	err := mc.Connection.CloseWithError(code, msg)
+	err := mc.Conn.CloseWithError(code, msg)
 	mc.shutdown()
 	return err
 }

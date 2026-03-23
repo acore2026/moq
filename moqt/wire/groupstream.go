@@ -114,12 +114,10 @@ func (gs *GroupStream) GetHeaderSubIDBytes(subid uint64) []byte {
 	return data
 }
 
-func (gs *GroupStream) Pipe(index int, stream quic.SendStream) (int, error) {
+func (gs *GroupStream) Pipe(index int, stream *quic.SendStream) (int, error) {
 
 	gs.ObjectCond.L.Lock()
-	for index >= len(gs.ObjectsArr) && !gs.IsEOF {
-		gs.ObjectCond.Wait()
-	}
+	gs.ObjectCond.Wait()
 
 	length := len(gs.ObjectsArr)
 
@@ -137,7 +135,7 @@ func (gs *GroupStream) Pipe(index int, stream quic.SendStream) (int, error) {
 		return index, err
 	}
 
-	if gs.IsEOF == true && index >= len(gs.ObjectsArr) {
+	if gs.IsEOF == true {
 		return index, io.EOF
 	}
 

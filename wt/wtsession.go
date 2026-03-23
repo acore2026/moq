@@ -6,7 +6,6 @@ import (
 
 	"github.com/DineshAdhi/moq-go/h3"
 
-	"net"
 	"net/http"
 	"time"
 
@@ -17,10 +16,10 @@ import (
 
 type WTSession struct {
 	quic.Stream
-	quicConn       quic.Connection
+	quicConn       *quic.Conn
 	ResponseWriter *h3.ResponseWriter
 	context        context.Context
-	uniStreamsChan chan quic.ReceiveStream
+	uniStreamsChan chan *quic.ReceiveStream
 }
 
 var DEFAULT_SETTINGS = []h3.Setting{
@@ -33,7 +32,7 @@ var DEFAULT_SETTINGS = []h3.Setting{
 	{Key: h3.SETTINGS_QPACK_BLOCKED_STREAMS, Value: 0},
 }
 
-func UpgradeWTS(quicConn quic.Connection) (*WTSession, *http.Request, error) {
+func UpgradeWTS(quicConn *quic.Conn) (*WTSession, *http.Request, error) {
 
 	// 1. Server opens a Uni-Stream and sends its Server SettingsFrame
 
@@ -114,14 +113,14 @@ func UpgradeWTS(quicConn quic.Connection) (*WTSession, *http.Request, error) {
 		return nil, nil, fmt.Errorf("[Protocol Mismatch]")
 	}
 
-	responseWriter := h3.NewResponseWriter(rrStream)
+	responseWriter := h3.NewResponseWriter(*rrStream)
 	responseWriter.Header().Add("Sec-Webtransport-Http3-Draft", "draft02")
 
 	wts := &WTSession{
 		quicConn:       quicConn,
 		ResponseWriter: responseWriter,
 		context:        context.TODO(),
-		uniStreamsChan: make(chan quic.ReceiveStream, 1024),
+		uniStreamsChan: make(chan *quic.ReceiveStream, 1024),
 	}
 
 	req.Body = wts
@@ -136,7 +135,7 @@ func (wts *WTSession) AcceptSession() {
 	go wts.ProcesUniStreams()
 }
 
-func (wts *WTSession) AcceptStream(ctx context.Context) (quic.Stream, error) {
+func (wts *WTSession) AcceptStream(ctx context.Context) (*quic.Stream, error) {
 	stream, err := wts.quicConn.AcceptStream(ctx)
 
 	if err != nil {
@@ -172,7 +171,7 @@ func (wts *WTSession) ProcesUniStreams() {
 		err = header.Read(quicvarint.NewReader(stream))
 
 		if err != nil {
-			if err, ok := err.(net.Error); ok && err.Timeout() {
+			if netErr, ok := err.(interface{ Timeout() bool }); ok && netErr.Timeout() {
 				continue // Ignoring (Timeout / Blocking) Streams for now. Probably H3 PUSH Streams.
 			}
 
@@ -186,11 +185,11 @@ func (wts *WTSession) ProcesUniStreams() {
 	}
 }
 
-func (wts *WTSession) AcceptUniStream(ctx context.Context) (quic.ReceiveStream, error) {
+func (wts *WTSession) AcceptUniStream(ctx context.Context) (*quic.ReceiveStream, error) {
 	return <-wts.uniStreamsChan, nil
 }
 
-func (wts *WTSession) OpenUniStreamSync(ctx context.Context) (quic.SendStream, error) {
+func (wts *WTSession) OpenUniStreamSync(ctx context.Context) (*quic.SendStream, error) {
 	stream, err := wts.quicConn.OpenUniStreamSync(ctx)
 
 	if err != nil {
@@ -206,7 +205,7 @@ func (wts *WTSession) OpenUniStreamSync(ctx context.Context) (quic.SendStream, e
 	return stream, nil
 }
 
-func (wts *WTSession) OpenStream() (quic.Stream, error) {
+func (wts *WTSession) OpenStream() (*quic.Stream, error) {
 	stream, err := wts.quicConn.OpenStream()
 
 	if err != nil {
@@ -222,7 +221,7 @@ func (wts *WTSession) OpenStream() (quic.Stream, error) {
 	return stream, nil
 }
 
-func (wts *WTSession) OpenUniStream() (quic.SendStream, error) {
+func (wts *WTSession) OpenUniStream() (*quic.SendStream, error) {
 	stream, err := wts.quicConn.OpenUniStream()
 
 	if err != nil {

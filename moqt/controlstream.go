@@ -13,11 +13,11 @@ import (
 
 type ControlStream struct {
 	*MOQTSession
-	stream          quic.Stream
+	stream          *quic.Stream
 	ishandshakedone bool
 }
 
-func NewControlStream(session *MOQTSession, stream quic.Stream) *ControlStream {
+func NewControlStream(session *MOQTSession, stream *quic.Stream) *ControlStream {
 	cs := &ControlStream{session, stream, false}
 	return cs
 }
@@ -39,9 +39,6 @@ func (cs *ControlStream) WriteControlMessage(msg wire.MOQTMessage) {
 }
 
 func (cs *ControlStream) ServeCS() {
-	defer func() {
-		cs.Close(wire.MOQERR_INTERNAL_ERROR, "[Control Stream Closed]")
-	}()
 
 	reader := quicvarint.NewReader(cs.stream)
 
@@ -147,7 +144,7 @@ func (cs *ControlStream) handleControlMessage(m wire.MOQTMessage) {
 	case wire.UNSUBSCRIBE:
 		cs.Handler.HandleUnsubscribe(m.(*wire.Unsubcribe))
 	default:
-		log.Error().Msgf("Unknown Control Message %+v", m)
+		log.Error().Msgf("Unknown Control Message +v", m)
 	}
 }
 

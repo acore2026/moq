@@ -98,7 +98,7 @@ func (listener *MOQTListener) Listen() error {
 }
 
 // Handles Plain QUIC based MOQ Sessions
-func (listener MOQTListener) handleMOQ(conn quic.Connection) {
+func (listener MOQTListener) handleMOQ(conn *quic.Conn) {
 
 	log.Debug().Msgf("[Incoming QUIC Session][IP - %s]", conn.RemoteAddr())
 
@@ -113,7 +113,7 @@ func (listener MOQTListener) handleMOQ(conn quic.Connection) {
 }
 
 // Handles WebTransport based MOQ Sessions
-func (listener MOQTListener) handleWebTransport(conn quic.Connection) {
+func (listener MOQTListener) handleWebTransport(conn *quic.Conn) {
 
 	log.Info().Msgf("[Incoming WebTransport Session][IP - %s]", conn.RemoteAddr())
 
