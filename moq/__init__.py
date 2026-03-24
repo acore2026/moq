@@ -69,6 +69,8 @@ from moq.messages import (
     ObjectStatus,
     ObjectHeader,
     ObjectDatagram,
+    FetchMessage,
+    FetchOkMessage,
 )
 
 from moq.session import (
@@ -118,6 +120,8 @@ __all__ = [
     'ObjectStatus',
     'ObjectHeader',
     'ObjectDatagram',
+    'FetchMessage',
+    'FetchOkMessage',
     
     # Session
     'MOQSession',
