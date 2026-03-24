@@ -1,21 +1,22 @@
 """
-MOQ Transport Package
+MOQ Transport Layer module.
+Provides QUIC transport support.
 """
 
-from moq.transport.session import MOQSession, SessionConfig, MOQClientSession, MOQServerSession
-from moq.transport.publisher import MOQPublisher, PublisherConfig
-from moq.transport.subscriber import MOQSubscriber, SubscriberConfig
-from moq.transport.relay import MOQRelay, RelayConfig
+from .quic_transport import (
+    QUICClient,
+    QUICServer,
+    MOQQuicProtocol,
+    StreamData,
+    DatagramData,
+    is_quic_available
+)
 
 __all__ = [
-    'MOQSession',
-    'SessionConfig',
-    'MOQClientSession',
-    'MOQServerSession',
-    'MOQPublisher',
-    'PublisherConfig',
-    'MOQSubscriber',
-    'SubscriberConfig',
-    'MOQRelay',
-    'RelayConfig',
+    'QUICClient',
+    'QUICServer',
+    'MOQQuicProtocol',
+    'StreamData',
+    'DatagramData',
+    'is_quic_available',
 ]
