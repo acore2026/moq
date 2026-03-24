@@ -91,12 +91,13 @@ from moq.sub import (
 
 from moq.relay import (
     MOQRelay,
+    ClientSession,
 )
 
 __all__ = [
     # Version
     '__version__',
-    
+
     # Encoding
     'VarInt',
     'encode_bytes',
@@ -106,7 +107,7 @@ __all__ = [
     'Location',
     'FullTrackName',
     'TrackAlias',
-    
+
     # Messages
     'MessageType',
     'ErrorCode',
@@ -122,20 +123,21 @@ __all__ = [
     'ObjectDatagram',
     'FetchMessage',
     'FetchOkMessage',
-    
+
     # Session
     'MOQSession',
     'Role',
     'SessionState',
-    
+
     # Publisher
     'MOQPublisher',
     'PublishedObject',
-    
+
     # Subscriber
     'MOQSubscriber',
     'ReceivedObject',
-    
+
     # Relay
     'MOQRelay',
+    'ClientSession',
 ]

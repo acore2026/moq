@@ -13,17 +13,14 @@ objects from the track "time/updates" within a specified range.
 """
 
 import asyncio
-import sys
 import logging
 
-sys.path.insert(0, '/home/acn/cxr/moq-py')
+from _bootstrap import ensure_repo_root, setup_logging
+
+ensure_repo_root()
+setup_logging()
 from moq.sub import MOQSubscriber
 from moq.encoding import FullTrackName
-
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
 logger = logging.getLogger(__name__)
 
 RELAY_HOST = "127.0.0.1"

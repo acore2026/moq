@@ -1,6 +1,7 @@
 """
 MOQ Transport - Relay Implementation
 Implements a caching relay for MOQT with memory and disk caching.
+Uses QUIC as the underlying transport protocol.
 """
 
 import os
@@ -8,6 +9,7 @@ import json
 import asyncio
 import logging
 import hashlib
+import shutil
 from typing import Dict, List, Optional, Set, Tuple, Callable
 from dataclasses import dataclass, field, asdict
 from datetime import datetime, timedelta
@@ -17,9 +19,12 @@ import threading
 from moq.session import MOQSession, Role, Subscription, Publication
 from moq.messages import (
     SubscribeMessage, PublishMessage, ObjectHeader, ObjectDatagram,
-    SubscribeOkMessage, PublishOkMessage, PublishDoneMessage
+    SubscribeOkMessage, PublishOkMessage, PublishDoneMessage,
+    decode_control_message, GroupOrder, FetchMessage, FetchOkMessage,
+    RequestErrorMessage, ErrorCode
 )
 from moq.encoding import FullTrackName, Location, VarInt
+from moq.transport import QUICServer, StreamData, DatagramData, is_quic_available
 
 logger = logging.getLogger(__name__)
 
@@ -61,6 +66,24 @@ class CachedObject:
     def get_location(self) -> Location:
         """Get object location."""
         return Location(self.group_id, self.object_id)
+
+
+@dataclass
+class ClientSession:
+    """Represents a connected client session over QUIC."""
+    session_id: str
+    protocol: any  # MOQQuicProtocol instance
+    quic_connection: any  # QuicConnection instance
+    role: Optional[Role] = None
+    subscriptions: Dict[FullTrackName, dict] = None
+    publications: Dict[FullTrackName, dict] = None
+    control_stream_id: Optional[int] = None
+    
+    def __post_init__(self):
+        if self.subscriptions is None:
+            self.subscriptions = {}
+        if self.publications is None:
+            self.publications = {}
 
 
 class ObjectCache:
@@ -133,6 +156,29 @@ class ObjectCache:
                 json.dump(self._disk_index, f)
         except Exception as e:
             logger.warning(f"Failed to save disk cache index: {e}")
+
+    def clear_disk_cache(self):
+        """Remove all cached objects and metadata from disk."""
+        if not self.disk_cache_dir:
+            return
+
+        with self._lock:
+            try:
+                if self.disk_cache_dir.exists():
+                    for path in self.disk_cache_dir.iterdir():
+                        if path.is_dir():
+                            shutil.rmtree(path)
+                        else:
+                            path.unlink()
+                else:
+                    self.disk_cache_dir.mkdir(parents=True, exist_ok=True)
+
+                self._disk_index.clear()
+                self._disk_size = 0
+                self._save_disk_index()
+                logger.info(f"Cleared disk cache: {self.disk_cache_dir}")
+            except Exception as e:
+                logger.warning(f"Failed to clear disk cache: {e}")
     
     def put(self, track_name: FullTrackName, obj: CachedObject):
         """Add object to cache."""
@@ -288,14 +334,21 @@ class MOQRelay:
     """
     MOQ Relay with caching support.
     Acts as both publisher and subscriber, forwarding and caching content.
+    Uses QUIC as the underlying transport protocol.
     """
     
     def __init__(self, host: str, port: int, 
                  cache_dir: Optional[str] = None,
                  max_memory_cache: int = 100 * 1024 * 1024,
-                 max_disk_cache: int = 1024 * 1024 * 1024):
+                 max_disk_cache: int = 1024 * 1024 * 1024,
+                 cert_file: Optional[str] = None,
+                 key_file: Optional[str] = None):
         self.host = host
         self.port = port
+        
+        # Check QUIC availability
+        if not is_quic_available():
+            raise RuntimeError("QUIC is not available. Please install aioquic.")
         
         # Cache
         self.cache = ObjectCache(
@@ -316,19 +369,452 @@ class MOQRelay:
         self._on_object_received: Optional[Callable] = None
         self._on_object_forwarded: Optional[Callable] = None
         
-        logger.info(f"MOQRelay initialized: {host}:{port}")
+        # QUIC Server
+        self._quic_server = QUICServer(
+            host=host,
+            port=port,
+            use_datagrams=True,
+            cert_file=cert_file,
+            key_file=key_file
+        )
+        
+        # Client management
+        self._clients: Dict[str, ClientSession] = {}
+        self._publications: Dict[FullTrackName, ClientSession] = {}
+        self._subscriptions: Dict[FullTrackName, list] = {}
+        self._object_cache: Dict[FullTrackName, list] = {}
+        self._max_cached_objects = 1000  # Limit cache size
+        self._running = False
+        
+        logger.info(f"MOQRelay initialized: {host}:{port} (QUIC)")
     
     async def start(self):
-        """Start the relay."""
-        logger.info(f"Starting relay on {self.host}:{self.port}")
-        # Server implementation would go here
+        """Start the relay server using QUIC transport."""
+        self._running = True
+
+        # Start each relay process with a clean on-disk cache.
+        self.cache.clear_disk_cache()
+        
+        # Set up QUIC server handlers
+        self._quic_server.set_handlers(
+            on_client_connect=self._on_quic_client_connect,
+            on_stream_data=self._on_quic_stream_data,
+            on_datagram=self._on_quic_datagram,
+            on_client_disconnect=self._on_quic_client_disconnect
+        )
+        
+        # Start QUIC server
+        await self._quic_server.start()
+        
+        logger.info(f"MOQ Relay running on {self.host}:{self.port} (QUIC)")
+        logger.info("Waiting for connections... (Press Ctrl+C to stop)")
     
     async def stop(self):
-        """Stop the relay."""
-        logger.info("Stopping relay")
+        """Stop the relay server."""
+        self._running = False
+        
+        # Stop the QUIC server
+        if self._quic_server:
+            await self._quic_server.stop()
+        
+        # Close all client connections
+        for client in list(self._clients.values()):
+            try:
+                if hasattr(client.protocol, 'close'):
+                    client.protocol.close()
+            except:
+                pass
+        self._clients.clear()
+        
+        # Close all MOQ sessions
         for session in self.sessions.values():
             session.close()
         self.sessions.clear()
+        
+        logger.info("Relay server stopped")
+    
+    async def _on_quic_client_connect(self, protocol):
+        """Handle new QUIC client connection."""
+        session_id = f"{protocol._quic.host_cid}"
+        
+        client = ClientSession(
+            session_id=session_id,
+            protocol=protocol,
+            quic_connection=protocol._quic
+        )
+        self._clients[session_id] = client
+        
+        logger.info(f"QUIC client connected: {session_id}")
+    
+    async def _on_quic_client_disconnect(self, protocol, error_code, reason):
+        """Handle QUIC client disconnection."""
+        # Find client by protocol
+        for session_id, client in list(self._clients.items()):
+            if client.protocol == protocol:
+                await self._cleanup_client(client)
+                break
+        
+        logger.info(f"QUIC client disconnected: error_code={error_code}, reason={reason}")
+    
+    async def _on_quic_stream_data(self, protocol, stream_data: StreamData):
+        """Handle data received on a QUIC stream."""
+        # Find client by protocol
+        client = None
+        for c in self._clients.values():
+            if c.protocol == protocol:
+                client = c
+                break
+        
+        if not client:
+            logger.warning("Received stream data from unknown client")
+            return
+        
+        # Set control stream if not set
+        if client.control_stream_id is None:
+            client.control_stream_id = stream_data.stream_id
+        
+        # Process the message
+        await self._handle_message(client, stream_data.data)
+    
+    async def _on_quic_datagram(self, protocol, datagram_data: DatagramData):
+        """Handle data received as QUIC datagram."""
+        # Find client by protocol
+        client = None
+        for c in self._clients.values():
+            if c.protocol == protocol:
+                client = c
+                break
+        
+        if not client:
+            logger.warning("Received datagram from unknown client")
+            return
+        
+        # Process the message
+        await self._handle_message(client, datagram_data.data)
+    
+    async def _handle_message(self, client: ClientSession, data: bytes):
+        """Handle a message from a client."""
+        try:
+            # Try to decode as control message first
+            try:
+                msg, _ = decode_control_message(data)
+                
+                if isinstance(msg, PublishMessage):
+                    await self._handle_publish(client, msg)
+                elif isinstance(msg, SubscribeMessage):
+                    await self._handle_subscribe(client, msg)
+                elif isinstance(msg, FetchMessage):
+                    await self._handle_fetch(client, msg)
+                else:
+                    logger.debug(f"Received control message type: {type(msg).__name__}")
+                return
+            except Exception as e:
+                logger.debug(f"Not a control message: {e}")
+                pass  # Not a control message, try data message
+            
+            # Try to decode as ObjectDatagram (data message)
+            try:
+                obj, _ = ObjectDatagram.decode(data)
+                await self._handle_object(client, obj)
+                return
+            except Exception as e:
+                logger.debug(f"Not an ObjectDatagram: {e}")
+                pass  # Not an ObjectDatagram either
+            
+            # Treat as raw data
+            logger.debug(f"Received raw data: {len(data)} bytes")
+            await self._forward_raw_data(client, data)
+                
+        except Exception as e:
+            logger.error(f"Error handling message: {e}")
+    
+    async def _handle_publish(self, client: ClientSession, msg: PublishMessage):
+        """Handle a publish request."""
+        track_name = msg.full_track_name
+        logger.info(f"Client {client.session_id} publishing: {track_name}")
+        
+        # Store publication
+        self._publications[track_name] = client
+        client.publications[track_name] = {
+            'track_alias': msg.track_alias,
+            'request_id': msg.request_id
+        }
+        
+        # Update publisher sessions
+        if track_name not in self.publisher_sessions:
+            self.publisher_sessions[track_name] = []
+        
+        # Send PUBLISH_OK
+        response = PublishOkMessage(request_id=msg.request_id)
+        response_data = response.encode()
+        logger.debug(f"Sending PUBLISH_OK: {len(response_data)} bytes")
+        await self._send_control_message(client, response_data)
+        logger.info(f"Publication accepted: {track_name}")
+    
+    async def _handle_subscribe(self, client: ClientSession, msg: SubscribeMessage):
+        """Handle a subscribe request."""
+        track_name = msg.full_track_name
+        logger.info(f"Client {client.session_id} subscribing to: {track_name}")
+        
+        # Store subscription
+        if track_name not in self._subscriptions:
+            self._subscriptions[track_name] = []
+        self._subscriptions[track_name].append(client)
+        client.subscriptions[track_name] = {
+            'track_alias': msg.track_alias,
+            'request_id': msg.request_id
+        }
+        
+        # Update subscriber sessions
+        if track_name not in self.subscriber_sessions:
+            self.subscriber_sessions[track_name] = []
+        
+        # Send SUBSCRIBE_OK
+        response = SubscribeOkMessage(
+            request_id=msg.request_id,
+            expires=0,
+            group_order=GroupOrder.ASCENDING
+        )
+        response_data = response.encode()
+        logger.debug(f"Sending SUBSCRIBE_OK: {len(response_data)} bytes")
+        await self._send_control_message(client, response_data)
+        logger.info(f"Subscription accepted: {track_name}")
+    
+    async def _handle_fetch(self, client: ClientSession, msg: FetchMessage):
+        """Handle a fetch request."""
+        track_name = msg.full_track_name
+        logger.info(f"Client {client.session_id} fetching from: {track_name}, "
+                   f"range=[{msg.start_group}:{msg.start_object} to {msg.end_group}:{msg.end_object}]")
+        
+        # Check if track exists (has a publisher)
+        has_cached_objects = track_name in self._object_cache and len(self._object_cache[track_name]) > 0
+        if track_name not in self._publications and not has_cached_objects:
+            logger.warning(f"Fetch requested for unknown track: {track_name}")
+            response = RequestErrorMessage(
+                request_id=msg.request_id,
+                error_code=ErrorCode.INTERNAL_ERROR,
+                reason="Track not found"
+            )
+            await self._send_control_message(client, response.encode())
+            return
+        
+        # Store fetch request
+        if track_name not in self._subscriptions:
+            self._subscriptions[track_name] = []
+        self._subscriptions[track_name].append(client)
+        
+        # Send FETCH_OK
+        response = FetchOkMessage(
+            request_id=msg.request_id,
+            group_order=GroupOrder.ASCENDING,
+            end_of_track=False
+        )
+        response_data = response.encode()
+        logger.debug(f"Sending FETCH_OK: {len(response_data)} bytes")
+        await self._send_control_message(client, response_data)
+        if track_name in self._publications:
+            logger.info(f"Fetch accepted: {track_name}")
+        else:
+            logger.info(f"Fetch accepted from cache: {track_name}")
+        
+        # Send cached objects that match the fetch range
+        await self._send_cached_objects(client, track_name, msg)
+    
+    async def _send_cached_objects(self, client: ClientSession, track_name: FullTrackName, msg: FetchMessage):
+        """Send cached objects that match the fetch range to the client."""
+        cached_objects = self._object_cache.get(track_name, [])
+        if not cached_objects:
+            logger.info(f"No cached objects for track: {track_name}")
+            return
+        
+        sent_count = 0
+        for obj_data in cached_objects:
+            # Check if object is within fetch range
+            # If end_group/end_object is None, fetch until the latest message
+            end_group_limit = msg.end_group if msg.end_group is not None else float('inf')
+            end_object_limit = msg.end_object if msg.end_object is not None else float('inf')
+            
+            if (msg.start_group <= obj_data['group_id'] <= end_group_limit and
+                msg.start_object <= obj_data['object_id'] <= end_object_limit):
+                
+                # Create ObjectDatagram and send
+                header = ObjectHeader(
+                    track_alias=obj_data['track_alias'],
+                    group_id=obj_data['group_id'],
+                    object_id=obj_data['object_id'],
+                    publisher_priority=obj_data['publisher_priority'],
+                    object_status=obj_data['object_status']
+                )
+                obj = ObjectDatagram(header=header, payload=obj_data['payload'])
+                
+                try:
+                    await self._send_datagram(client, obj.encode())
+                    sent_count += 1
+                    logger.debug(f"Sent cached object: group={obj_data['group_id']}, object={obj_data['object_id']}")
+                except Exception as e:
+                    logger.error(f"Error sending cached object to {client.session_id}: {e}")
+        
+        logger.info(f"Sent {sent_count} cached objects to {client.session_id} for fetch request")
+    
+    async def _handle_object(self, client: ClientSession, obj: ObjectDatagram):
+        """Handle an object from a publisher."""
+        # Find the track name from the client's publications
+        track_name = None
+        for tn, pub_info in client.publications.items():
+            if pub_info['track_alias'] == obj.header.track_alias:
+                track_name = tn
+                break
+        
+        if not track_name:
+            logger.warning(f"Received object for unknown track alias: {obj.header.track_alias}")
+            return
+        
+        # Cache the object for future fetches
+        await self._cache_object(track_name, obj)
+        
+        # Also cache in the ObjectCache for advanced caching features
+        cached_obj = CachedObject(
+            track_alias=obj.header.track_alias,
+            group_id=obj.header.group_id,
+            object_id=obj.header.object_id,
+            publisher_priority=obj.header.publisher_priority,
+            payload=obj.payload
+        )
+        self.cache.put(track_name, cached_obj)
+        
+        # Forward to all subscribers
+        await self._forward_object(track_name, obj)
+    
+    async def _cache_object(self, track_name: FullTrackName, obj: ObjectDatagram):
+        """Cache an object for future fetch requests."""
+        if track_name not in self._object_cache:
+            self._object_cache[track_name] = []
+        
+        # Store object data
+        self._object_cache[track_name].append({
+            'track_alias': obj.header.track_alias,
+            'group_id': obj.header.group_id,
+            'object_id': obj.header.object_id,
+            'publisher_priority': obj.header.publisher_priority,
+            'object_status': obj.header.object_status,
+            'payload': obj.payload
+        })
+        
+        # Limit cache size
+        if len(self._object_cache[track_name]) > self._max_cached_objects:
+            self._object_cache[track_name].pop(0)
+        
+        logger.debug(f"Cached object for {track_name}: group={obj.header.group_id}, object={obj.header.object_id}")
+    
+    async def _forward_raw_data(self, sender: ClientSession, data: bytes):
+        """Forward raw data to subscribers."""
+        # Try to find which track this data belongs to
+        for track_name, subscribers in self._subscriptions.items():
+            # Check if sender is the publisher for this track
+            if track_name in self._publications and self._publications[track_name] == sender:
+                # Forward to all subscribers except sender
+                for subscriber in subscribers:
+                    if subscriber.session_id != sender.session_id:
+                        try:
+                            await self._send_data_stream(subscriber, data)
+                        except Exception as e:
+                            logger.error(f"Error forwarding to {subscriber.session_id}: {e}")
+                break
+    
+    async def _forward_object(self, track_name: FullTrackName, obj: ObjectDatagram):
+        """Forward an object to all subscribers of a track."""
+        subscribers = self._subscriptions.get(track_name, [])
+        if not subscribers:
+            return
+
+        data = obj.encode()
+        forwarded = 0
+
+        for subscriber in subscribers:
+            try:
+                await self._send_datagram(subscriber, data)
+                forwarded += 1
+            except Exception as e:
+                logger.error(f"Error forwarding to {subscriber.session_id}: {e}")
+        
+        if forwarded > 0:
+            logger.debug(f"Forwarded object to {forwarded} subscribers")
+        
+        # Call event handler if set
+        if self._on_object_forwarded:
+            try:
+                self._on_object_forwarded(track_name, obj)
+            except Exception as e:
+                logger.error(f"Error in forward handler: {e}")
+    
+    async def _send_control_message(self, client: ClientSession, data: bytes):
+        """Send a message to a client over QUIC."""
+        try:
+            if client.control_stream_id is not None:
+                # Send on control stream
+                client.quic_connection.send_stream_data(client.control_stream_id, data)
+            else:
+                # Open a new stream or use datagram
+                stream_id = client.quic_connection.get_next_available_stream_id(is_unidirectional=False)
+                client.quic_connection.send_stream_data(stream_id, data)
+            
+            # Transmit the data
+            if hasattr(client.protocol, 'transmit'):
+                client.protocol.transmit()
+            
+            logger.debug(f"Sent {len(data)} bytes to {client.session_id}")
+        except Exception as e:
+            logger.error(f"Error sending message to {client.session_id}: {e}")
+            raise
+
+    async def _send_datagram(self, client: ClientSession, data: bytes):
+        """Send a datagram to a client over QUIC."""
+        try:
+            client.quic_connection.send_datagram_frame(data)
+            if hasattr(client.protocol, 'transmit'):
+                client.protocol.transmit()
+            logger.debug(f"Sent datagram {len(data)} bytes to {client.session_id}")
+        except Exception as e:
+            logger.error(f"Error sending datagram to {client.session_id}: {e}")
+            raise
+
+    async def _send_data_stream(self, client: ClientSession, data: bytes):
+        """Send opaque raw data on a fresh unidirectional stream."""
+        try:
+            stream_id = client.quic_connection.get_next_available_stream_id(is_unidirectional=True)
+            client.quic_connection.send_stream_data(stream_id, data, end_stream=True)
+            if hasattr(client.protocol, 'transmit'):
+                client.protocol.transmit()
+            logger.debug(f"Sent raw stream {len(data)} bytes to {client.session_id} on stream {stream_id}")
+        except Exception as e:
+            logger.error(f"Error sending raw stream data to {client.session_id}: {e}")
+            raise
+    
+    async def _cleanup_client(self, client: ClientSession):
+        """Clean up when a client disconnects."""
+        logger.info(f"Client disconnected: {client.session_id}")
+        
+        # Remove from clients
+        if client.session_id in self._clients:
+            del self._clients[client.session_id]
+        
+        # Remove publications
+        for track_name in list(client.publications.keys()):
+            if track_name in self._publications and self._publications[track_name].session_id == client.session_id:
+                del self._publications[track_name]
+                logger.info(f"Publication removed: {track_name}")
+        
+        # Remove subscriptions
+        for track_name in list(client.subscriptions.keys()):
+            if track_name in self._subscriptions:
+                self._subscriptions[track_name] = [
+                    s for s in self._subscriptions[track_name] 
+                    if s.session_id != client.session_id
+                ]
+                if not self._subscriptions[track_name]:
+                    del self._subscriptions[track_name]
+        
+        # Keep cached objects available for later FETCH requests.
     
     def register_session(self, session: MOQSession):
         """Register a new session."""
@@ -363,9 +849,6 @@ class MOQRelay:
             self.subscriber_sessions[track_name] = []
         if session not in self.subscriber_sessions[track_name]:
             self.subscriber_sessions[track_name].append(session)
-        
-        # Check if we have cached content to serve
-        # TODO: Serve cached content based on subscription filter
         
         # Forward subscription upstream if needed
         self._forward_subscribe(msg)

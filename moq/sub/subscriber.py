@@ -308,6 +308,14 @@ class MOQSubscriber:
     def _handle_fetch_ok(self, msg: FetchOkMessage):
         """Handle FETCH_OK message."""
         logger.info(f"Fetch accepted: request_id={msg.request_id}")
+
+        if self._session:
+            fetch_request = self._session.fetches.get(msg.request_id)
+            if fetch_request:
+                track_name = fetch_request.full_track_name
+                track_alias = self._session.track_aliases.get(track_name)
+                if track_alias is not None:
+                    self._track_aliases[track_alias] = track_name
     
     async def _handle_data_stream(self, stream_id: int, data: bytes):
         """Handle data from a data stream."""

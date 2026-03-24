@@ -30,7 +30,7 @@ from moq import MOQPublisher, FullTrackName, PublishedObject
 
 async def main():
     # Create and connect publisher
-    publisher = MOQPublisher(host="127.0.0.1", port=4443)
+    publisher = MOQPublisher("127.0.0.1", 4443)
     await publisher.connect()
     
     # Define track
@@ -66,7 +66,7 @@ from moq import MOQSubscriber, FullTrackName, ReceivedObject
 
 async def main():
     # Create subscriber
-    subscriber = MOQSubscriber(host="127.0.0.1", port=4443)
+    subscriber = MOQSubscriber("127.0.0.1", 4443)
     
     # Set up message handler
     def on_object(obj: ReceivedObject):
@@ -102,7 +102,7 @@ import asyncio
 from moq import MOQSubscriber, FullTrackName
 
 async def main():
-    subscriber = MOQSubscriber(host="127.0.0.1", port=4443)
+    subscriber = MOQSubscriber("127.0.0.1", 4443)
     
     def on_object(obj):
         print(f"Fetched: group={obj.group_id}, payload={obj.payload}")
@@ -241,16 +241,16 @@ from moq.messages import (
 ```bash
 # Terminal 1: Start relay
 cd /path/to/moq-py
-python -m cases.relay
+python examples/relay_example.py
 
 # Terminal 2: Run publisher
-python examples/external_usage_example.py publisher
+python examples/publisher_example.py
 
 # Terminal 3: Run subscriber
-python examples/external_usage_example.py subscriber
+python examples/subscriber_example.py
 
 # Terminal 4: Run fetch
-python examples/external_usage_example.py fetch
+python examples/fetch_example.py
 ```
 
 ## Dependencies

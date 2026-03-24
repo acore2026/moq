@@ -5,9 +5,12 @@ Tests basic functionality of Publisher, Subscriber, and Relay.
 """
 
 import asyncio
+import json
+import tempfile
 import sys
 import logging
 from typing import List
+from pathlib import Path
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -216,6 +219,47 @@ async def test_cache():
     logger.info("Cache test passed!\n")
 
 
+async def test_relay_start_clears_disk_cache():
+    """Test relay startup clears any existing disk cache."""
+    logger.info("Testing Relay startup cache reset...")
+
+    from moq.relay import MOQRelay
+
+    class DummyQuicServer:
+        def set_handlers(self, **kwargs):
+            self.handlers = kwargs
+
+        async def start(self):
+            return None
+
+        async def stop(self):
+            return None
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        cache_dir = Path(tmpdir)
+        stale_dir = cache_dir / "stale-track" / "1"
+        stale_dir.mkdir(parents=True)
+        (stale_dir / "1.obj").write_bytes(b"stale-object")
+        (cache_dir / "cache_index.json").write_text(json.dumps({"stale-track": {"1": str(stale_dir / "1.obj")}}))
+
+        relay = MOQRelay(
+            host="127.0.0.1",
+            port=0,
+            cache_dir=str(cache_dir),
+            max_memory_cache=1024,
+            max_disk_cache=1024
+        )
+        relay._quic_server = DummyQuicServer()
+
+        await relay.start()
+
+        assert (cache_dir / "cache_index.json").exists()
+        assert json.loads((cache_dir / "cache_index.json").read_text()) == {}
+        assert not any(path.name == "stale-track" for path in cache_dir.iterdir())
+
+    logger.info("Relay startup cache reset test passed!\n")
+
+
 async def run_all_tests():
     """Run all integration tests."""
     logger.info("=" * 60)
@@ -233,6 +277,7 @@ async def run_all_tests():
     # Run async tests
     await test_session_management()
     await test_cache()
+    await test_relay_start_clears_disk_cache()
     
     logger.info("=" * 60)
     logger.info("All tests passed! ✓")

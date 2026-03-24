@@ -4,7 +4,11 @@ Provides QUIC connection management with connection migration support.
 """
 
 import asyncio
+import ipaddress
 import logging
+import ssl
+import tempfile
+from datetime import datetime, timedelta
 from typing import Optional, Callable, Dict, Set, Tuple, Any
 from dataclasses import dataclass
 
@@ -23,6 +27,15 @@ try:
 except ImportError:
     AIOQUIC_AVAILABLE = False
     logger.warning("aioquic not available. QUIC transport will not function.")
+
+try:
+    from cryptography import x509
+    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.hazmat.primitives.asymmetric import rsa
+    from cryptography.x509.oid import NameOID
+    CRYPTOGRAPHY_AVAILABLE = True
+except ImportError:
+    CRYPTOGRAPHY_AVAILABLE = False
 
 
 @dataclass
@@ -44,14 +57,22 @@ class MOQQuicProtocol(QuicConnectionProtocol):
     
     def __init__(self, *args, on_stream_data: Optional[Callable] = None,
                  on_datagram: Optional[Callable] = None,
+                 on_connection_open: Optional[Callable] = None,
                  on_connection_close: Optional[Callable] = None,
                  **kwargs):
         super().__init__(*args, **kwargs)
         self._on_stream_data = on_stream_data
         self._on_datagram = on_datagram
+        self._on_connection_open = on_connection_open
         self._on_connection_close = on_connection_close
         self._stream_buffers: Dict[int, bytes] = {}
         logger.info("MOQQuicProtocol initialized")
+
+    def connection_made(self, transport):
+        """Handle new QUIC connection."""
+        super().connection_made(transport)
+        if self._on_connection_open:
+            asyncio.create_task(self._on_connection_open(self))
     
     def quic_event_received(self, event: QuicEvent) -> None:
         """Handle QUIC events."""
@@ -105,6 +126,7 @@ class QUICClient:
         self.use_datagrams = use_datagrams
         self.protocol: Optional[MOQQuicProtocol] = None
         self._connection: Optional[QuicConnection] = None
+        self._connection_cm = None
         self._on_stream_data: Optional[Callable] = None
         self._on_datagram: Optional[Callable] = None
         self._on_close: Optional[Callable] = None
@@ -115,6 +137,8 @@ class QUICClient:
             is_client=True,
             max_datagram_frame_size=65536 if use_datagrams else None,
         )
+        # Local relay examples use a self-signed certificate.
+        self._config.verify_mode = ssl.CERT_NONE
     
     def set_handlers(self, 
                      on_stream_data: Optional[Callable] = None,
@@ -130,12 +154,10 @@ class QUICClient:
         logger.info(f"Connecting to {self.host}:{self.port}")
         
         try:
-            loop = asyncio.get_event_loop()
-            
             # Create connection
             from aioquic.asyncio.client import connect
-            
-            async with connect(
+
+            self._connection_cm = connect(
                 self.host,
                 self.port,
                 configuration=self._config,
@@ -146,13 +168,20 @@ class QUICClient:
                     on_connection_close=self._on_close,
                     **kwargs
                 )
-            ) as protocol:
-                self.protocol = protocol
-                self._connection = protocol._quic
-                logger.info("QUIC connection established")
-                return True
+            )
+
+            self.protocol = await self._connection_cm.__aenter__()
+            self._connection = self.protocol._quic
+            logger.info("QUIC connection established")
+            return True
                 
         except Exception as e:
+            if self._connection_cm is not None:
+                try:
+                    await self._connection_cm.__aexit__(type(e), e, e.__traceback__)
+                except Exception:
+                    pass
+                self._connection_cm = None
             logger.error(f"Failed to connect: {e}")
             return False
     
@@ -191,6 +220,13 @@ class QUICClient:
         if self.protocol:
             self.protocol.close()
             logger.info("QUIC connection closed")
+        if self._connection_cm is not None:
+            try:
+                loop = asyncio.get_running_loop()
+                loop.create_task(self._connection_cm.__aexit__(None, None, None))
+            except RuntimeError:
+                pass
+            self._connection_cm = None
 
 
 class QUICServer:
@@ -205,6 +241,7 @@ class QUICServer:
         self.use_datagrams = use_datagrams
         self.cert_file = cert_file
         self.key_file = key_file
+        self._temp_cert_dir = None
         self._server = None
         self._on_client_connect: Optional[Callable] = None
         self._on_stream_data: Optional[Callable] = None
@@ -220,6 +257,8 @@ class QUICServer:
         
         if cert_file and key_file:
             self._config.load_cert_chain(cert_file, key_file)
+        else:
+            self._ensure_self_signed_cert()
     
     def set_handlers(self,
                      on_client_connect: Optional[Callable] = None,
@@ -232,14 +271,69 @@ class QUICServer:
         self._on_datagram = on_datagram
         self._on_client_disconnect = on_client_disconnect
     
-    def _create_protocol(self) -> MOQQuicProtocol:
+    def _create_protocol(self, *args, **kwargs) -> MOQQuicProtocol:
         """Create protocol instance for new connection."""
         return MOQQuicProtocol(
-            quic=None,  # Will be set by aioquic
+            *args,
             on_stream_data=self._on_stream_data,
             on_datagram=self._on_datagram,
-            on_connection_close=self._on_client_disconnect
+            on_connection_open=self._on_client_connect,
+            on_connection_close=self._on_client_disconnect,
+            **kwargs
         )
+
+    def _ensure_self_signed_cert(self):
+        """Generate a self-signed certificate for local development if needed."""
+        if self._config.certificate and self._config.private_key:
+            return
+
+        if not CRYPTOGRAPHY_AVAILABLE:
+            raise RuntimeError(
+                "SSL certificate is required for a server and cryptography is not available "
+                "to generate a self-signed certificate."
+            )
+
+        self._temp_cert_dir = tempfile.TemporaryDirectory(prefix="moq-quic-")
+        cert_path = f"{self._temp_cert_dir.name}/cert.pem"
+        key_path = f"{self._temp_cert_dir.name}/key.pem"
+
+        key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+        subject = issuer = x509.Name([
+            x509.NameAttribute(NameOID.COMMON_NAME, self.host),
+        ])
+
+        san_values = [x509.DNSName("localhost")]
+        try:
+            san_values.append(x509.IPAddress(ipaddress.ip_address(self.host)))
+        except ValueError:
+            san_values.append(x509.DNSName(self.host))
+
+        cert = (
+            x509.CertificateBuilder()
+            .subject_name(subject)
+            .issuer_name(issuer)
+            .public_key(key.public_key())
+            .serial_number(x509.random_serial_number())
+            .not_valid_before(datetime.utcnow() - timedelta(minutes=1))
+            .not_valid_after(datetime.utcnow() + timedelta(days=30))
+            .add_extension(x509.SubjectAlternativeName(san_values), critical=False)
+            .sign(key, hashes.SHA256())
+        )
+
+        with open(cert_path, "wb") as cert_file:
+            cert_file.write(cert.public_bytes(serialization.Encoding.PEM))
+
+        with open(key_path, "wb") as key_file:
+            key_file.write(
+                key.private_bytes(
+                    encoding=serialization.Encoding.PEM,
+                    format=serialization.PrivateFormat.TraditionalOpenSSL,
+                    encryption_algorithm=serialization.NoEncryption(),
+                )
+            )
+
+        self._config.load_cert_chain(cert_path, key_path)
+        logger.info("Generated temporary self-signed certificate for QUIC server")
     
     async def start(self):
         """Start the QUIC server."""
@@ -258,8 +352,16 @@ class QUICServer:
         """Stop the QUIC server."""
         if self._server:
             self._server.close()
-            await self._server.wait_closed()
+            wait_closed = getattr(self._server, "wait_closed", None)
+            if callable(wait_closed):
+                await wait_closed()
+            else:
+                # aioquic's server object does not expose wait_closed().
+                await asyncio.sleep(0)
             logger.info("QUIC server stopped")
+        if self._temp_cert_dir is not None:
+            self._temp_cert_dir.cleanup()
+            self._temp_cert_dir = None
 
 
 def is_quic_available() -> bool:

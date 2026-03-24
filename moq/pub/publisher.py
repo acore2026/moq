@@ -48,6 +48,7 @@ class MOQPublisher:
         # Publications
         self._publications: Dict[FullTrackName, int] = {}  # track -> request_id
         self._active_tracks: Dict[int, FullTrackName] = {}  # request_id -> track
+        self._publish_waiters: Dict[int, asyncio.Event] = {}
         
         # Stream management
         self._streams: Dict[int, int] = {}  # track_alias -> stream_id
@@ -152,7 +153,16 @@ class MOQPublisher:
         request_id = await self._session.publish(track_name)
         self._publications[track_name] = request_id
         self._active_tracks[request_id] = track_name
-        
+        self._publish_waiters[request_id] = asyncio.Event()
+
+        try:
+            await asyncio.wait_for(self._publish_waiters[request_id].wait(), timeout=5.0)
+        except asyncio.TimeoutError:
+            logger.warning(f"Timed out waiting for PUBLISH_OK: {track_name}")
+            return False
+        finally:
+            self._publish_waiters.pop(request_id, None)
+
         return True
     
     async def unpublish(self, track_name: FullTrackName, reason: str = ""):
@@ -291,6 +301,12 @@ class MOQPublisher:
                 
                 if isinstance(msg, PublishOkMessage):
                     self._session.handle_publish_ok(msg)
+                    waiter = self._publish_waiters.get(msg.request_id)
+                    if waiter:
+                        waiter.set()
+                    track_name = self._active_tracks.get(msg.request_id)
+                    if track_name and self._on_publication_accepted:
+                        self._on_publication_accepted(track_name)
                 elif isinstance(msg, PublishDoneMessage):
                     self._session.handle_publish_done(msg)
                     

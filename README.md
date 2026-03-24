@@ -45,8 +45,16 @@ moq-py/
 │       ├── __init__.py
 │       └── subscriber.py   # Subscriber 实现
 ├── examples/                # 示例代码
-│   ├── basic_example.py    # 基础发布订阅示例
-│   └── reconnection_example.py  # 断线重连示例
+│   ├── _bootstrap.py        # 示例共享启动逻辑
+│   ├── README.md            # 示例总览
+│   ├── TEST_CASES_CN.md     # 示例用例说明
+│   ├── relay_example.py     # Relay 启动示例
+│   ├── publisher_example.py  # 发布端示例
+│   ├── subscriber_example.py # 订阅端示例
+│   ├── fetch_example.py     # 历史拉取示例
+│   ├── reconnection_example.py  # 断线重连示例
+│   ├── integration_example.py    # 外部集成示例
+│   └── basic_example.py     # 一体化演示示例
 ├── tests/                   # 测试代码
 ├── docs/                    # 文档
 ├── requirements.txt         # 依赖项
@@ -179,27 +187,29 @@ pip install -r requirements.txt
 
 ### 2. 运行示例
 
-#### 基础发布订阅示例
+#### 端到端核心示例
+
+推荐按下面顺序体验核心协议能力：
 
 ```bash
 # 终端 1: 启动 Relay
 cd /home/acn/cxr/moq-py
-python examples/basic_example.py relay
+python examples/relay_example.py
 
 # 终端 2: 启动 Publisher
-python examples/basic_example.py publisher
+python examples/publisher_example.py
 
 # 终端 3: 启动 Subscriber
-python examples/basic_example.py subscriber
+python examples/subscriber_example.py
 ```
 
-或者运行单进程演示：
+如果想验证历史拉取功能，可以再运行：
 
 ```bash
-python examples/basic_example.py demo
+python examples/fetch_example.py
 ```
 
-#### 断线重连示例
+如果想观察断线恢复和缓存行为，可以运行：
 
 ```bash
 # 终端 1: 启动 Relay
@@ -211,6 +221,11 @@ python examples/reconnection_example.py publisher
 # 终端 3: 启动 Subscriber（会自动模拟断线重连）
 python examples/reconnection_example.py subscriber
 ```
+
+如果需要一次性查看全部脚本的定位，请参考：
+
+- [`examples/README.md`](/home/acn/cxr/moq-py/examples/README.md)
+- [`examples/TEST_CASES_CN.md`](/home/acn/cxr/moq-py/examples/TEST_CASES_CN.md)
 
 ### 3. PyCharm 开发环境配置
 

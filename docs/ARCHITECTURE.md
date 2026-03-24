@@ -20,6 +20,18 @@
 4. **日志完善**: 关键操作都有详细的日志记录
 5. **跨平台**: 支持 Linux 和 Windows
 
+### 1.3 示例导航
+
+如果你要把架构图和实际脚本对应起来，优先看这些示例：
+
+- [`examples/relay_example.py`](/home/acn/cxr/moq-py/examples/relay_example.py)
+- [`examples/publisher_example.py`](/home/acn/cxr/moq-py/examples/publisher_example.py)
+- [`examples/subscriber_example.py`](/home/acn/cxr/moq-py/examples/subscriber_example.py)
+- [`examples/fetch_example.py`](/home/acn/cxr/moq-py/examples/fetch_example.py)
+- [`examples/reconnection_example.py`](/home/acn/cxr/moq-py/examples/reconnection_example.py)
+- [`examples/integration_example.py`](/home/acn/cxr/moq-py/examples/integration_example.py)
+- [`examples/TEST_CASES_CN.md`](/home/acn/cxr/moq-py/examples/TEST_CASES_CN.md)
+
 ## 2. 系统架构
 
 ### 2.1 分层架构

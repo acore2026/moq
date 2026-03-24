@@ -14,7 +14,7 @@ Prerequisites:
 
 Usage:
     # Terminal 1: Start relay
-    python -m cases.relay
+    python examples/relay_example.py
     
     # Terminal 2: Run this example
     python examples/integration_example.py
@@ -22,19 +22,16 @@ Usage:
 
 import asyncio
 import logging
-import sys
 from typing import Optional
+
+from _bootstrap import ensure_repo_root, setup_logging
+
+ensure_repo_root()
+setup_logging()
 
 # Import MOQ Transport as an external library would
 from moq import MOQPublisher, MOQSubscriber, FullTrackName
 from moq import PublishedObject, ReceivedObject
-from moq import FetchMessage, FetchOkMessage  # For advanced usage
-
-# Setup logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
 logger = logging.getLogger(__name__)
 
 
@@ -62,8 +59,8 @@ class MOQApplication:
         
         try:
             self.publisher = MOQPublisher(
-                host=self.relay_host,
-                port=self.relay_port
+                self.relay_host,
+                self.relay_port
             )
             
             connected = await self.publisher.connect()
@@ -90,8 +87,8 @@ class MOQApplication:
         
         try:
             self.subscriber = MOQSubscriber(
-                host=self.relay_host,
-                port=self.relay_port
+                self.relay_host,
+                self.relay_port
             )
             
             # Set up handlers

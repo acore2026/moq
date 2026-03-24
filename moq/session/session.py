@@ -412,6 +412,7 @@ class MOQSession:
             Request ID of the fetch
         """
         request_id = self._get_next_request_id()
+        track_alias = self._get_or_create_track_alias(track_name)
         
         msg = FetchMessage(
             request_id=request_id,
@@ -436,6 +437,7 @@ class MOQSession:
             end_object=end_object
         )
         self.fetches[request_id] = fetch
+        logger.info(f"Prepared FETCH: request_id={request_id}, track_alias={track_alias}")
         
         data = msg.encode()
         if self._send_callback:

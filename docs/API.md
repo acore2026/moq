@@ -476,6 +476,24 @@ class SessionState(IntEnum):
 
 ---
 
+## 示例导航
+
+如果你想直接运行代码而不是只看接口定义，优先参考：
+
+- [`examples/README.md`](/home/acn/cxr/moq-py/examples/README.md)
+- [`examples/TEST_CASES_CN.md`](/home/acn/cxr/moq-py/examples/TEST_CASES_CN.md)
+
+推荐入口：
+
+- [`examples/relay_example.py`](/home/acn/cxr/moq-py/examples/relay_example.py)
+- [`examples/publisher_example.py`](/home/acn/cxr/moq-py/examples/publisher_example.py)
+- [`examples/subscriber_example.py`](/home/acn/cxr/moq-py/examples/subscriber_example.py)
+- [`examples/fetch_example.py`](/home/acn/cxr/moq-py/examples/fetch_example.py)
+- [`examples/reconnection_example.py`](/home/acn/cxr/moq-py/examples/reconnection_example.py)
+- [`examples/integration_example.py`](/home/acn/cxr/moq-py/examples/integration_example.py)
+
+---
+
 ## 发布模块
 
 ### MOQPublisher
@@ -665,7 +683,9 @@ class MOQRelay:
         port: int,
         cache_dir: Optional[str] = None,
         max_memory_cache: int = 100 * 1024 * 1024,
-        max_disk_cache: int = 1024 * 1024 * 1024
+        max_disk_cache: int = 1024 * 1024 * 1024,
+        cert_file: Optional[str] = None,
+        key_file: Optional[str] = None
     )
     
     # 生命周期

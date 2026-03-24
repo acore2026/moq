@@ -16,15 +16,12 @@ import sys
 import logging
 from typing import Optional
 
-# Setup logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
+from _bootstrap import ensure_repo_root, setup_logging
+
+ensure_repo_root()
+setup_logging()
 logger = logging.getLogger(__name__)
 
-# Import MOQ modules
-sys.path.insert(0, '/home/acn/cxr/moq-py')
 from moq.encoding import FullTrackName
 from moq.pub import MOQPublisher, PublishedObject
 from moq.sub import MOQSubscriber, ReceivedObject

@@ -121,7 +121,7 @@ cd /home/acn/cxr/moq-py
 source venv/bin/activate  # Linux/macOS
 # 或 venv\Scripts\activate  # Windows
 
-python examples/basic_example.py relay
+python examples/relay_example.py
 ```
 
 输出示例：
@@ -135,7 +135,7 @@ python examples/basic_example.py relay
 cd /home/acn/cxr/moq-py
 source venv/bin/activate
 
-python examples/basic_example.py publisher
+python examples/publisher_example.py
 ```
 
 输出示例：
@@ -152,7 +152,7 @@ python examples/basic_example.py publisher
 cd /home/acn/cxr/moq-py
 source venv/bin/activate
 
-python examples/basic_example.py subscriber
+python examples/subscriber_example.py
 ```
 
 输出示例：
@@ -175,6 +175,8 @@ python examples/basic_example.py demo
 
 这将在一个进程中同时运行 Relay、Publisher 和 Subscriber，方便快速测试。
 
+如果你只想验证发布/订阅最小闭环，推荐优先使用上面的 `relay_example.py`、`publisher_example.py` 和 `subscriber_example.py` 组合。
+
 ### 断线重连示例
 
 这个示例演示连接中断后如何从缓存恢复数据。
@@ -193,6 +195,13 @@ python examples/reconnection_example.py publisher
 ```bash
 python examples/reconnection_example.py subscriber
 ```
+
+### 示例索引
+
+更完整的示例说明请查看：
+
+- [`examples/README.md`](/home/acn/cxr/moq-py/examples/README.md)
+- [`examples/TEST_CASES_CN.md`](/home/acn/cxr/moq-py/examples/TEST_CASES_CN.md)
 
 Subscriber 会自动模拟断线重连，你会看到类似输出：
 ```
@@ -251,8 +260,7 @@ Run → Edit Configurations...
 
 点击 + → Python
 Name: Run Relay
-Script path: /home/acn/cxr/moq-py/examples/basic_example.py
-Parameters: relay
+Script path: /home/acn/cxr/moq-py/examples/relay_example.py
 Python interpreter: 项目虚拟环境
 Working directory: /home/acn/cxr/moq-py
 ```
@@ -261,16 +269,14 @@ Working directory: /home/acn/cxr/moq-py
 
 ```
 Name: Run Publisher
-Script path: /home/acn/cxr/moq-py/examples/basic_example.py
-Parameters: publisher
+Script path: /home/acn/cxr/moq-py/examples/publisher_example.py
 ```
 
 #### 配置 Subscriber 运行
 
 ```
 Name: Run Subscriber
-Script path: /home/acn/cxr/moq-py/examples/basic_example.py
-Parameters: subscriber
+Script path: /home/acn/cxr/moq-py/examples/subscriber_example.py
 ```
 
 #### 配置 Demo 运行
@@ -279,6 +285,13 @@ Parameters: subscriber
 Name: Run Demo
 Script path: /home/acn/cxr/moq-py/examples/basic_example.py
 Parameters: demo
+```
+
+#### 配置 Fetch 运行
+
+```
+Name: Run Fetch
+Script path: /home/acn/cxr/moq-py/examples/fetch_example.py
 ```
 
 ### 5. 运行调试
@@ -294,7 +307,7 @@ Parameters: demo
 在代码左侧点击设置断点，可以在以下位置设置：
 - `moq/pub/publisher.py:send_object` - 观察对象发送
 - `moq/sub/subscriber.py:on_object_received` - 观察对象接收
-- `moq/relay/relay.py:cache_object` - 观察缓存行为
+   - `moq/relay/relay.py:cache_object` - 观察缓存行为
 
 ---
 
@@ -368,7 +381,7 @@ sudo lsof -i :4443
 sudo kill -9 <PID>
 
 # 或使用不同端口
-python examples/basic_example.py relay  # 修改代码中的端口
+python examples/relay_example.py  # 如需修改端口，可编辑脚本中的配置
 ```
 
 #### 4. 权限不足
@@ -464,7 +477,7 @@ sudo iptables -L | grep 4443
 1. **阅读架构文档**: `docs/ARCHITECTURE.md`
 2. **查看 API 文档**: `docs/API.md`
 3. **阅读完整 README**: `README.md`
-4. **开发自定义应用**: 基于 `examples/basic_example.py` 修改
+4. **开发自定义应用**: 优先参考 `examples/integration_example.py`
 
 ---
 
