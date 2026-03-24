@@ -201,11 +201,19 @@ class MOQSubscriber:
         del self._subscriptions[track_name]
     
     async def fetch(self, track_name: FullTrackName,
-                   start_group: int, start_object: int,
-                   end_group: int, end_object: int,
+                   start_group: int = 0, start_object: int = 0,
+                   end_group: Optional[int] = None, end_object: Optional[int] = None,
                    subscriber_priority: int = 128) -> int:
         """
         Fetch specific objects from a track.
+        
+        Args:
+            track_name: The track to fetch from
+            start_group: Starting group ID (defaults to 0)
+            start_object: Starting object ID (defaults to 0)
+            end_group: Ending group ID (None means fetch until latest)
+            end_object: Ending object ID (None means fetch until latest)
+            subscriber_priority: Priority level (0-255)
         
         Returns:
             Request ID of the fetch
@@ -360,8 +368,65 @@ class MOQSubscriber:
     
     async def _handle_fetch_stream(self, stream_id: int, data: bytes, offset: int):
         """Handle fetch stream data."""
-        # TODO: Implement fetch stream handling
-        pass
+        try:
+            from moq.messages import FetchHeader, ObjectHeader
+            
+            # Parse fetch header
+            header, consumed = FetchHeader.decode(data, offset)
+            offset += consumed
+            
+            logger.debug(f"Fetch stream header: request_id={header.request_id}")
+            
+            # Get fetch request info
+            if not self._session:
+                logger.warning("No session available for fetch stream")
+                return
+                
+            fetch_request = self._session.fetches.get(header.request_id)
+            if not fetch_request:
+                logger.warning(f"Unknown fetch request: {header.request_id}")
+                return
+            
+            track_name = fetch_request.full_track_name
+            track_alias = self._session.track_aliases.get(track_name, 0)
+            
+            # Parse objects in the fetch stream
+            while offset < len(data):
+                try:
+                    # Parse object header
+                    obj_header, consumed = ObjectHeader.decode(data, offset)
+                    offset += consumed
+                    
+                    # Read payload
+                    payload_len, consumed = VarInt.decode(data, offset)
+                    offset += consumed
+                    
+                    if offset + payload_len > len(data):
+                        logger.warning("Incomplete payload in fetch stream")
+                        break
+                    
+                    payload = data[offset:offset + payload_len]
+                    offset += payload_len
+                    
+                    # Create received object
+                    received_obj = ReceivedObject(
+                        track_alias=track_alias,
+                        group_id=obj_header.group_id,
+                        object_id=obj_header.object_id,
+                        publisher_priority=obj_header.publisher_priority,
+                        payload=payload,
+                        object_status=obj_header.object_status
+                    )
+                    
+                    await self._object_queue.put(received_obj)
+                    logger.debug(f"Fetch object received: group={obj_header.group_id}, object={obj_header.object_id}")
+                    
+                except Exception as e:
+                    logger.debug(f"Failed to parse fetch stream object: {e}")
+                    break
+                    
+        except Exception as e:
+            logger.warning(f"Failed to handle fetch stream: {e}")
     
     async def _handle_datagram(self, protocol, data: DatagramData):
         """Handle incoming datagram."""

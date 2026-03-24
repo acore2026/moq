@@ -392,12 +392,21 @@ class MOQSession:
         logger.info(f"Sent PUBLISH_DONE: request_id={request_id}, status={status_code}")
     
     async def fetch(self, track_name: FullTrackName,
-                    start_group: int, start_object: int,
-                    end_group: int, end_object: int,
+                    start_group: int = 0, start_object: int = 0,
+                    end_group: Optional[int] = None, end_object: Optional[int] = None,
                     subscriber_priority: int = 128,
                     group_order: GroupOrder = GroupOrder.ASCENDING) -> int:
         """
         Fetch specific objects from a track.
+        
+        Args:
+            track_name: The track to fetch from
+            start_group: Starting group ID (defaults to 0)
+            start_object: Starting object ID (defaults to 0)
+            end_group: Ending group ID (None means fetch until latest)
+            end_object: Ending object ID (None means fetch until latest)
+            subscriber_priority: Priority level (0-255)
+            group_order: Group order (ASCENDING or DESCENDING)
         
         Returns:
             Request ID of the fetch

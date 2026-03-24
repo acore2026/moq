@@ -23,7 +23,8 @@ sys.path.insert(0, '/home/acn/cxr/moq-py')
 from moq.encoding import FullTrackName
 from moq.messages import (
     SubscribeMessage, SubscribeOkMessage, PublishMessage, PublishOkMessage,
-    ObjectHeader, ObjectDatagram, decode_control_message, GroupOrder
+    ObjectHeader, ObjectDatagram, decode_control_message, GroupOrder,
+    FetchMessage, FetchOkMessage
 )
 from moq.session import MOQSession, Role
 
@@ -68,6 +69,9 @@ class MOQRelayServer:
         self.subscriptions: Dict[FullTrackName, list] = {}
         self.server = None
         self._running = False
+        # Object cache: track_name -> [(group_id, object_id, payload), ...]
+        self.object_cache: Dict[FullTrackName, list] = {}
+        self.max_cached_objects = 1000  # Limit cache size
     
     async def start(self):
         """Start the relay server."""
@@ -162,6 +166,8 @@ class MOQRelayServer:
                     await self._handle_publish(client, msg)
                 elif isinstance(msg, SubscribeMessage):
                     await self._handle_subscribe(client, msg)
+                elif isinstance(msg, FetchMessage):
+                    await self._handle_fetch(client, msg)
                 else:
                     logger.debug(f"Received control message type: {type(msg).__name__}")
                 return
@@ -227,6 +233,79 @@ class MOQRelayServer:
         await self._send_message(client, response_data)
         logger.info(f"Subscription accepted: {track_name}")
     
+    async def _handle_fetch(self, client: ClientSession, msg: FetchMessage):
+        """Handle a fetch request."""
+        track_name = msg.full_track_name
+        logger.info(f"Client {client.session_id} fetching from: {track_name}, "
+                   f"range=[{msg.start_group}:{msg.start_object} to {msg.end_group}:{msg.end_object}]")
+        
+        # Check if track exists (has a publisher)
+        if track_name not in self.publications:
+            logger.warning(f"Fetch requested for unknown track: {track_name}")
+            from moq.messages import RequestErrorMessage, ErrorCode
+            response = RequestErrorMessage(
+                request_id=msg.request_id,
+                error_code=ErrorCode.INTERNAL_ERROR,
+                reason="Track not found"
+            )
+            await self._send_message(client, response.encode())
+            return
+        
+        # Store fetch request
+        if track_name not in self.subscriptions:
+            self.subscriptions[track_name] = []
+        self.subscriptions[track_name].append(client)
+        
+        # Send FETCH_OK
+        response = FetchOkMessage(
+            request_id=msg.request_id,
+            group_order=GroupOrder.ASCENDING,
+            end_of_track=False
+        )
+        response_data = response.encode()
+        logger.debug(f"Sending FETCH_OK: {len(response_data)} bytes")
+        await self._send_message(client, response_data)
+        logger.info(f"Fetch accepted: {track_name}")
+        
+        # Send cached objects that match the fetch range
+        await self._send_cached_objects(client, track_name, msg)
+
+    async def _send_cached_objects(self, client: ClientSession, track_name: FullTrackName, msg: FetchMessage):
+        """Send cached objects that match the fetch range to the client."""
+        cached_objects = self.object_cache.get(track_name, [])
+        if not cached_objects:
+            logger.info(f"No cached objects for track: {track_name}")
+            return
+        
+        sent_count = 0
+        for obj_data in cached_objects:
+            # Check if object is within fetch range
+            # If end_group/end_object is None, fetch until the latest message
+            end_group_limit = msg.end_group if msg.end_group is not None else float('inf')
+            end_object_limit = msg.end_object if msg.end_object is not None else float('inf')
+            
+            if (msg.start_group <= obj_data['group_id'] <= end_group_limit and
+                msg.start_object <= obj_data['object_id'] <= end_object_limit):
+                
+                # Create ObjectDatagram and send
+                header = ObjectHeader(
+                    track_alias=0,  # Fetch doesn't use track_alias in the same way
+                    group_id=obj_data['group_id'],
+                    object_id=obj_data['object_id'],
+                    publisher_priority=obj_data['publisher_priority'],
+                    object_status=obj_data['object_status']
+                )
+                obj = ObjectDatagram(header=header, payload=obj_data['payload'])
+                
+                try:
+                    await self._send_message(client, obj.encode())
+                    sent_count += 1
+                    logger.debug(f"Sent cached object: group={obj_data['group_id']}, object={obj_data['object_id']}")
+                except Exception as e:
+                    logger.error(f"Error sending cached object to {client.session_id}: {e}")
+        
+        logger.info(f"Sent {sent_count} cached objects to {client.session_id} for fetch request")
+
     async def _handle_object(self, client: ClientSession, obj: ObjectDatagram):
         """Handle an object from a publisher."""
         # Find the track name from the client's publications
@@ -240,8 +319,31 @@ class MOQRelayServer:
             logger.warning(f"Received object for unknown track alias: {obj.header.track_alias}")
             return
         
+        # Cache the object for future fetches
+        await self._cache_object(track_name, obj)
+        
         # Forward to all subscribers
         await self._forward_object(track_name, obj)
+    
+    async def _cache_object(self, track_name: FullTrackName, obj: ObjectDatagram):
+        """Cache an object for future fetch requests."""
+        if track_name not in self.object_cache:
+            self.object_cache[track_name] = []
+        
+        # Store object data
+        self.object_cache[track_name].append({
+            'group_id': obj.header.group_id,
+            'object_id': obj.header.object_id,
+            'publisher_priority': obj.header.publisher_priority,
+            'object_status': obj.header.object_status,
+            'payload': obj.payload
+        })
+        
+        # Limit cache size
+        if len(self.object_cache[track_name]) > self.max_cached_objects:
+            self.object_cache[track_name].pop(0)
+        
+        logger.debug(f"Cached object for {track_name}: group={obj.header.group_id}, object={obj.header.object_id}")
     
     async def _forward_raw_data(self, sender: ClientSession, data: bytes):
         """Forward raw data to subscribers."""
@@ -307,6 +409,12 @@ class MOQRelayServer:
                 ]
                 if not self.subscriptions[track_name]:
                     del self.subscriptions[track_name]
+        
+        # Clean up object cache if no more publishers/subscribers for track
+        for track_name in list(self.object_cache.keys()):
+            if track_name not in self.publications and track_name not in self.subscriptions:
+                del self.object_cache[track_name]
+                logger.debug(f"Cleaned up cache for: {track_name}")
         
         # Close connection
         try:

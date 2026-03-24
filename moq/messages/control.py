@@ -416,15 +416,19 @@ class PublishDoneMessage:
 # Fetch messages
 @dataclass
 class FetchMessage:
-    """FETCH message for requesting specific objects."""
+    """FETCH message for requesting specific objects.
+    
+    If start_group and start_object are not specified, defaults to 0.
+    If end_group and end_object are not specified (None), fetches until the latest message.
+    """
     request_id: int
     full_track_name: FullTrackName
-    subscriber_priority: int
-    group_order: GroupOrder
-    start_group: int
-    start_object: int
-    end_group: int
-    end_object: int
+    subscriber_priority: int = 128
+    group_order: GroupOrder = GroupOrder.ASCENDING
+    start_group: int = 0
+    start_object: int = 0
+    end_group: Optional[int] = None
+    end_object: Optional[int] = None
     parameters: Optional[Parameters] = None
     
     def encode(self) -> bytes:
@@ -432,10 +436,10 @@ class FetchMessage:
         payload += self.full_track_name.encode()
         payload += bytes([self.subscriber_priority])
         payload += bytes([self.group_order])
-        payload += VarInt.encode(self.start_group)
-        payload += VarInt.encode(self.start_object)
-        payload += VarInt.encode(self.end_group)
-        payload += VarInt.encode(self.end_object)
+        payload += VarInt.encode(self.start_group if self.start_group is not None else 0)
+        payload += VarInt.encode(self.start_object if self.start_object is not None else 0)
+        payload += VarInt.encode(self.end_group if self.end_group is not None else 0xFFFFFFFFFFFFFFFF)
+        payload += VarInt.encode(self.end_object if self.end_object is not None else 0xFFFFFFFFFFFFFFFF)
         if self.parameters:
             payload += self.parameters.encode()
         return VarInt.encode(MessageType.FETCH) + encode_bytes(payload)
@@ -463,9 +467,15 @@ class FetchMessage:
         
         end_group, consumed = VarInt.decode(data, offset)
         offset += consumed
+        # Special value indicates "until latest"
+        if end_group == 0xFFFFFFFFFFFFFFFF:
+            end_group = None
         
         end_object, consumed = VarInt.decode(data, offset)
         offset += consumed
+        # Special value indicates "until latest"
+        if end_object == 0xFFFFFFFFFFFFFFFF:
+            end_object = None
         
         parameters = None
         if offset < len(data):
