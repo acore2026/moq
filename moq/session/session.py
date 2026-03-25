@@ -144,6 +144,10 @@ class MOQSession:
         request_id = self._next_request_id
         self._next_request_id += 1
         return request_id
+
+    def get_next_request_id(self) -> int:
+        """Get next available request ID (public interface)."""
+        return self._get_next_request_id()
     
     def _get_or_create_track_alias(self, track_name: FullTrackName) -> int:
         """Get existing or create new track alias."""
@@ -341,14 +345,19 @@ class MOQSession:
         
         logger.info(f"Sent SUBSCRIBE_OK: request_id={request_id}")
     
-    async def publish(self, track_name: FullTrackName) -> int:
+    async def publish(self, track_name: FullTrackName, request_id: int = None) -> int:
         """
         Publish a track.
-        
+
+        Args:
+            track_name: Full track name to publish
+            request_id: Optional request ID to use (if None, generates a new one)
+
         Returns:
             Request ID of the publication
         """
-        request_id = self._get_next_request_id()
+        if request_id is None:
+            request_id = self._get_next_request_id()
         track_alias = self._get_or_create_track_alias(track_name)
         
         msg = PublishMessage(

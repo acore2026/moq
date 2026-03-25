@@ -148,14 +148,18 @@ class MOQPublisher:
             return False
         
         logger.info(f"Publishing track: {track_name}")
-        
-        # Send PUBLISH message
-        request_id = await self._session.publish(track_name)
-        self._publications[track_name] = request_id
-        self._active_tracks[request_id] = track_name
+
+        # Generate request ID and create waiter BEFORE sending the message
+        # This prevents a race condition where the response arrives before the waiter is created
+        request_id = self._session.get_next_request_id()
         self._publish_waiters[request_id] = asyncio.Event()
 
         try:
+            # Send PUBLISH message
+            await self._session.publish(track_name, request_id=request_id)
+            self._publications[track_name] = request_id
+            self._active_tracks[request_id] = track_name
+
             await asyncio.wait_for(self._publish_waiters[request_id].wait(), timeout=5.0)
         except asyncio.TimeoutError:
             logger.warning(f"Timed out waiting for PUBLISH_OK: {track_name}")
