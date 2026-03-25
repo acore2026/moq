@@ -4,8 +4,10 @@ Unit tests for MOQ Transport encoding module.
 """
 
 import unittest
-import sys
-sys.path.insert(0, '/home/acn/cxr/moq-py')
+
+from _path_helper import ensure_repo_root
+
+ensure_repo_root()
 
 from moq.encoding import VarInt, encode_bytes, decode_bytes
 from moq.encoding import KeyValuePair, Parameters

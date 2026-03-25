@@ -15,7 +15,10 @@ between publishers and subscribers.
 import asyncio
 import logging
 
-from _bootstrap import ensure_repo_root, setup_logging
+try:
+    from examples._bootstrap import ensure_repo_root, setup_logging
+except ImportError:  # pragma: no cover - direct script execution fallback
+    from _bootstrap import ensure_repo_root, setup_logging
 
 ensure_repo_root()
 setup_logging()

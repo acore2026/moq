@@ -435,16 +435,8 @@ class MOQRelay:
     
     async def _on_quic_client_connect(self, protocol):
         """Handle new QUIC client connection."""
-        session_id = f"{protocol._quic.host_cid}"
-        
-        client = ClientSession(
-            session_id=session_id,
-            protocol=protocol,
-            quic_connection=protocol._quic
-        )
-        self._clients[session_id] = client
-        
-        logger.info(f"QUIC client connected: {session_id}")
+        client = self._get_or_create_client(protocol)
+        logger.info(f"QUIC client connected: {client.session_id}")
     
     async def _on_quic_client_disconnect(self, protocol, error_code, reason):
         """Handle QUIC client disconnection."""
@@ -458,16 +450,7 @@ class MOQRelay:
     
     async def _on_quic_stream_data(self, protocol, stream_data: StreamData):
         """Handle data received on a QUIC stream."""
-        # Find client by protocol
-        client = None
-        for c in self._clients.values():
-            if c.protocol == protocol:
-                client = c
-                break
-        
-        if not client:
-            logger.warning("Received stream data from unknown client")
-            return
+        client = self._get_or_create_client(protocol)
         
         # Set control stream if not set
         if client.control_stream_id is None:
@@ -478,16 +461,7 @@ class MOQRelay:
     
     async def _on_quic_datagram(self, protocol, datagram_data: DatagramData):
         """Handle data received as QUIC datagram."""
-        # Find client by protocol
-        client = None
-        for c in self._clients.values():
-            if c.protocol == protocol:
-                client = c
-                break
-        
-        if not client:
-            logger.warning("Received datagram from unknown client")
-            return
+        client = self._get_or_create_client(protocol)
         
         # Process the message
         await self._handle_message(client, datagram_data.data)
@@ -527,6 +501,27 @@ class MOQRelay:
                 
         except Exception as e:
             logger.error(f"Error handling message: {e}")
+
+    def _get_or_create_client(self, protocol) -> ClientSession:
+        """Find the client session for a protocol, creating it if needed.
+
+        QUIC connection callbacks are scheduled asynchronously, so the first
+        stream or datagram can arrive before `_on_quic_client_connect` runs.
+        Creating the session lazily here avoids dropping that initial message.
+        """
+        for client in self._clients.values():
+            if client.protocol == protocol:
+                return client
+
+        session_id = f"{protocol._quic.host_cid}"
+        client = ClientSession(
+            session_id=session_id,
+            protocol=protocol,
+            quic_connection=protocol._quic
+        )
+        self._clients[session_id] = client
+        logger.info(f"QUIC client registered lazily: {session_id}")
+        return client
     
     async def _handle_publish(self, client: ClientSession, msg: PublishMessage):
         """Handle a publish request."""

@@ -12,10 +12,14 @@ import logging
 from typing import List
 from pathlib import Path
 
+import pytest
+
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-sys.path.insert(0, '/home/acn/cxr/moq-py')
+from _path_helper import ensure_repo_root
+
+ensure_repo_root()
 
 from moq.encoding import FullTrackName, VarInt
 from moq.messages import (
@@ -155,6 +159,7 @@ def test_object_datagram():
     logger.info("Object Datagram test passed!\n")
 
 
+@pytest.mark.asyncio
 async def test_session_management():
     """Test session management."""
     logger.info("Testing Session Management...")
@@ -177,6 +182,7 @@ async def test_session_management():
     logger.info("Session Management test passed!\n")
 
 
+@pytest.mark.asyncio
 async def test_cache():
     """Test caching functionality."""
     logger.info("Testing Cache...")
@@ -219,6 +225,7 @@ async def test_cache():
     logger.info("Cache test passed!\n")
 
 
+@pytest.mark.asyncio
 async def test_relay_start_clears_disk_cache():
     """Test relay startup clears any existing disk cache."""
     logger.info("Testing Relay startup cache reset...")
@@ -260,6 +267,64 @@ async def test_relay_start_clears_disk_cache():
     logger.info("Relay startup cache reset test passed!\n")
 
 
+@pytest.mark.asyncio
+async def test_relay_registers_client_lazily_for_first_publish():
+    """Test relay accepts the first publish even if connect callback is delayed."""
+    logger.info("Testing lazy relay client registration...")
+
+    from moq.relay import MOQRelay
+    from moq.transport import StreamData
+    from moq.messages import PublishMessage
+
+    class DummyQuicConnection:
+        def __init__(self):
+            self.sent_streams = []
+
+        def send_stream_data(self, stream_id, data, end_stream=False):
+            self.sent_streams.append((stream_id, data, end_stream))
+
+    class DummyProtocol:
+        def __init__(self):
+            self._quic = type("DummyQuic", (), {"host_cid": "lazy-client"})()
+            self.transmit_calls = 0
+
+        def transmit(self):
+            self.transmit_calls += 1
+
+    relay = MOQRelay(
+        host="127.0.0.1",
+        port=0,
+        cache_dir=None,
+        max_memory_cache=1024,
+        max_disk_cache=1024
+    )
+
+    protocol = DummyProtocol()
+    protocol._quic = DummyQuicConnection()
+    protocol._quic.host_cid = "lazy-client"
+
+    track_name = FullTrackName([b"time"], b"updates")
+    publish_msg = PublishMessage(
+        request_id=7,
+        track_alias=3,
+        full_track_name=track_name
+    )
+
+    await relay._on_quic_stream_data(
+        protocol,
+        StreamData(stream_id=0, data=publish_msg.encode(), end_stream=False)
+    )
+
+    assert "lazy-client" in relay._clients
+    client = relay._clients["lazy-client"]
+    assert client.control_stream_id == 0
+    assert track_name in relay._publications
+    assert client.publications[track_name]["request_id"] == 7
+    assert protocol._quic.sent_streams, "relay did not send PUBLISH_OK"
+
+    logger.info("Lazy relay client registration test passed!\n")
+
+
 async def run_all_tests():
     """Run all integration tests."""
     logger.info("=" * 60)
@@ -278,6 +343,7 @@ async def run_all_tests():
     await test_session_management()
     await test_cache()
     await test_relay_start_clears_disk_cache()
+    await test_relay_registers_client_lazily_for_first_publish()
     
     logger.info("=" * 60)
     logger.info("All tests passed! ✓")

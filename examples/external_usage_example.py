@@ -9,13 +9,19 @@ reference. This wrapper keeps the older path usable for now.
 import asyncio
 import logging
 
-from _bootstrap import ensure_repo_root, setup_logging
+try:
+    from examples._bootstrap import ensure_repo_root, setup_logging
+except ImportError:  # pragma: no cover - direct script execution fallback
+    from _bootstrap import ensure_repo_root, setup_logging
 
 ensure_repo_root()
 setup_logging()
 logger = logging.getLogger(__name__)
 
-from integration_example import main as integration_main
+try:
+    from examples.integration_example import main as integration_main
+except ImportError:  # pragma: no cover - direct script execution fallback
+    from integration_example import main as integration_main
 
 
 async def main():

@@ -4,8 +4,10 @@ Unit tests for MOQ Transport messages module.
 """
 
 import unittest
-import sys
-sys.path.insert(0, '/home/acn/cxr/moq-py')
+
+from _path_helper import ensure_repo_root
+
+ensure_repo_root()
 
 from moq.messages import (
     SetupMessage, GoAwayMessage,
