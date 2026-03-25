@@ -29,6 +29,7 @@ from moq.messages import (
     GroupOrder, SubscribeFilter
 )
 from moq.encoding import Parameters
+from moq.transport import StreamData
 
 
 def test_varint_encoding():
@@ -209,6 +210,69 @@ async def test_session_waits_for_async_control_send():
     assert request_id in session.subscriptions
 
     logger.info("Async control send test passed!\n")
+
+
+@pytest.mark.asyncio
+async def test_publisher_reassembles_fragmented_publish_ok():
+    """Test publisher handles fragmented PUBLISH_OK on the control stream."""
+    logger.info("Testing fragmented PUBLISH_OK handling...")
+
+    from moq.pub.publisher import MOQPublisher
+    from moq.session import MOQSession, Role
+
+    publisher = MOQPublisher("127.0.0.1", 4443)
+    publisher._session = MOQSession(session_id="pub-test", role=Role.PUBLISHER)
+
+    request_id = 7
+    publisher._publish_waiters[request_id] = asyncio.Event()
+    publisher._active_tracks[request_id] = FullTrackName([b"time"], b"updates")
+
+    encoded = PublishOkMessage(request_id=request_id).encode()
+    split_at = len(encoded) // 2
+
+    await publisher._handle_stream_data(None, StreamData(stream_id=0, data=encoded[:split_at]))
+    assert not publisher._publish_waiters[request_id].is_set()
+
+    await publisher._handle_stream_data(None, StreamData(stream_id=0, data=encoded[split_at:]))
+    assert publisher._publish_waiters[request_id].is_set()
+
+    logger.info("Fragmented PUBLISH_OK handling test passed!\n")
+
+
+@pytest.mark.asyncio
+async def test_relay_reassembles_fragmented_publish():
+    """Test relay handles fragmented PUBLISH on the control stream."""
+    logger.info("Testing fragmented PUBLISH handling at relay...")
+
+    from moq.relay.relay import MOQRelay
+
+    relay = MOQRelay(host="127.0.0.1", port=4443, cache_dir="/tmp/moq_test_cache_frag")
+
+    class FakeQuic:
+        host_cid = b"relay-test-client"
+
+    class FakeProtocol:
+        _quic = FakeQuic()
+
+    protocol = FakeProtocol()
+    track_name = FullTrackName([b"live"], b"video")
+    encoded = PublishMessage(request_id=3, track_alias=11, full_track_name=track_name).encode()
+    split_at = len(encoded) // 2
+
+    seen = []
+
+    async def capture_publish(client, msg):
+        seen.append((client.session_id, msg.request_id, msg.track_alias, msg.full_track_name))
+
+    relay._handle_publish = capture_publish
+
+    await relay._on_quic_stream_data(protocol, StreamData(stream_id=0, data=encoded[:split_at]))
+    assert seen == []
+
+    await relay._on_quic_stream_data(protocol, StreamData(stream_id=0, data=encoded[split_at:]))
+    assert seen == [("b'relay-test-client'", 3, 11, track_name)]
+
+    logger.info("Fragmented PUBLISH handling test passed!\n")
 
 
 @pytest.mark.asyncio

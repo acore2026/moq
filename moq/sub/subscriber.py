@@ -62,6 +62,7 @@ class MOQSubscriber:
         
         # Object delivery queue
         self._object_queue: asyncio.Queue = asyncio.Queue()
+        self._control_buffer = b""
         
         logger.info(f"MOQSubscriber initialized for {relay_host}:{relay_port}")
     
@@ -247,30 +248,34 @@ class MOQSubscriber:
         
         if data.stream_id == 0:
             # Control stream
-            await self._handle_control_data(data.data)
+            await self._handle_control_data(data.data, end_stream=data.end_stream)
         else:
             # Data stream - could be subgroup or fetch stream
             await self._handle_data_stream(data.stream_id, data.data)
     
-    async def _handle_control_data(self, data: bytes):
+    async def _handle_control_data(self, data: bytes, end_stream: bool = False):
         """Handle control message data."""
-        try:
-            from moq.messages import decode_control_message
-            msg, consumed = decode_control_message(data)
-            
+        self._control_buffer += data
+
+        while self._control_buffer:
+            try:
+                from moq.messages import decode_control_message
+
+                msg, consumed = decode_control_message(self._control_buffer)
+            except Exception as e:
+                if end_stream:
+                    logger.warning(f"Failed to decode control message: {e}")
+                    self._control_buffer = b""
+                break
+
             if isinstance(msg, SubscribeOkMessage):
                 self._handle_subscribe_ok(msg)
             elif isinstance(msg, RequestErrorMessage):
                 self._handle_request_error(msg)
             elif isinstance(msg, FetchOkMessage):
                 self._handle_fetch_ok(msg)
-            
-            # Handle remaining data if any
-            if consumed < len(data):
-                await self._handle_control_data(data[consumed:])
-                
-        except Exception as e:
-            logger.warning(f"Failed to decode control message: {e}")
+
+            self._control_buffer = self._control_buffer[consumed:]
     
     def _handle_subscribe_ok(self, msg: SubscribeOkMessage):
         """Handle SUBSCRIBE_OK message."""

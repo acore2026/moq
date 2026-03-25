@@ -49,6 +49,7 @@ class MOQPublisher:
         self._publications: Dict[FullTrackName, int] = {}  # track -> request_id
         self._active_tracks: Dict[int, FullTrackName] = {}  # request_id -> track
         self._publish_waiters: Dict[int, asyncio.Event] = {}
+        self._control_buffer = b""
         
         # Stream management
         self._streams: Dict[int, int] = {}  # track_alias -> stream_id
@@ -299,23 +300,35 @@ class MOQPublisher:
         
         # Parse and handle control messages
         if self._session and data.stream_id == 0:
+            await self._handle_control_data(data.data, end_stream=data.end_stream)
+
+    async def _handle_control_data(self, data: bytes, end_stream: bool = False):
+        """Handle buffered control stream data."""
+        self._control_buffer += data
+
+        while self._control_buffer:
             try:
                 from moq.messages import decode_control_message
-                msg, _ = decode_control_message(data.data)
-                
-                if isinstance(msg, PublishOkMessage):
-                    self._session.handle_publish_ok(msg)
-                    waiter = self._publish_waiters.get(msg.request_id)
-                    if waiter:
-                        waiter.set()
-                    track_name = self._active_tracks.get(msg.request_id)
-                    if track_name and self._on_publication_accepted:
-                        self._on_publication_accepted(track_name)
-                elif isinstance(msg, PublishDoneMessage):
-                    self._session.handle_publish_done(msg)
-                    
+
+                msg, consumed = decode_control_message(self._control_buffer)
             except Exception as e:
-                logger.warning(f"Failed to decode control message: {e}")
+                if end_stream:
+                    logger.warning(f"Failed to decode control message: {e}")
+                    self._control_buffer = b""
+                break
+
+            self._control_buffer = self._control_buffer[consumed:]
+
+            if isinstance(msg, PublishOkMessage):
+                self._session.handle_publish_ok(msg)
+                waiter = self._publish_waiters.get(msg.request_id)
+                if waiter:
+                    waiter.set()
+                track_name = self._active_tracks.get(msg.request_id)
+                if track_name and self._on_publication_accepted:
+                    self._on_publication_accepted(track_name)
+            elif isinstance(msg, PublishDoneMessage):
+                self._session.handle_publish_done(msg)
     
     async def _handle_datagram(self, protocol, data: DatagramData):
         """Handle incoming datagram."""

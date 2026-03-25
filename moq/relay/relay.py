@@ -78,6 +78,7 @@ class ClientSession:
     subscriptions: Dict[FullTrackName, dict] = None
     publications: Dict[FullTrackName, dict] = None
     control_stream_id: Optional[int] = None
+    control_buffer: bytes = b""
     
     def __post_init__(self):
         if self.subscriptions is None:
@@ -456,8 +457,10 @@ class MOQRelay:
         if client.control_stream_id is None:
             client.control_stream_id = stream_data.stream_id
         
-        # Process the message
-        await self._handle_message(client, stream_data.data)
+        if stream_data.stream_id == client.control_stream_id:
+            await self._handle_control_stream_data(client, stream_data.data, end_stream=stream_data.end_stream)
+        else:
+            await self._handle_message(client, stream_data.data)
     
     async def _on_quic_datagram(self, protocol, datagram_data: DatagramData):
         """Handle data received as QUIC datagram."""
@@ -501,6 +504,33 @@ class MOQRelay:
                 
         except Exception as e:
             logger.error(f"Error handling message: {e}")
+
+    async def _handle_control_stream_data(self, client: ClientSession, data: bytes, end_stream: bool = False):
+        """Handle buffered control stream data from a client."""
+        client.control_buffer += data
+
+        while client.control_buffer:
+            try:
+                msg, consumed = decode_control_message(client.control_buffer)
+            except Exception as e:
+                if end_stream:
+                    logger.warning(f"Failed to decode control message from {client.session_id}: {e}")
+                    client.control_buffer = b""
+                break
+
+            client.control_buffer = client.control_buffer[consumed:]
+            await self._dispatch_control_message(client, msg)
+
+    async def _dispatch_control_message(self, client: ClientSession, msg: object):
+        """Dispatch a decoded control message."""
+        if isinstance(msg, PublishMessage):
+            await self._handle_publish(client, msg)
+        elif isinstance(msg, SubscribeMessage):
+            await self._handle_subscribe(client, msg)
+        elif isinstance(msg, FetchMessage):
+            await self._handle_fetch(client, msg)
+        else:
+            logger.debug(f"Received control message type: {type(msg).__name__}")
 
     def _get_or_create_client(self, protocol) -> ClientSession:
         """Find the client session for a protocol, creating it if needed.
