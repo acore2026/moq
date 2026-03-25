@@ -183,6 +183,35 @@ async def test_session_management():
 
 
 @pytest.mark.asyncio
+async def test_session_waits_for_async_control_send():
+    """Test that control messages await async send callbacks."""
+    logger.info("Testing async control send...")
+
+    from moq.session import MOQSession, Role
+
+    session = MOQSession(session_id="async-send-test", role=Role.SUBSCRIBER)
+    send_events = []
+    send_done = asyncio.Event()
+
+    async def send_callback(data: bytes):
+        await asyncio.sleep(0.01)
+        send_events.append(data)
+        send_done.set()
+
+    session.set_send_callback(send_callback)
+
+    track_name = FullTrackName([b"test"], b"stream")
+    request_id = await session.subscribe(track_name)
+
+    assert request_id == 0
+    assert send_done.is_set()
+    assert len(send_events) == 1
+    assert request_id in session.subscriptions
+
+    logger.info("Async control send test passed!\n")
+
+
+@pytest.mark.asyncio
 async def test_cache():
     """Test caching functionality."""
     logger.info("Testing Cache...")

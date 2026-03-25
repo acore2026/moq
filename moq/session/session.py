@@ -4,6 +4,7 @@ Manages MOQT sessions, subscriptions, and publications.
 """
 
 import asyncio
+import inspect
 import logging
 from typing import Dict, Set, Optional, Callable, Any, List
 from enum import IntEnum
@@ -128,6 +129,15 @@ class MOQSession:
     def set_send_callback(self, callback: Callable[[bytes], None]):
         """Set callback for sending data."""
         self._send_callback = callback
+
+    async def _send_control_message(self, data: bytes):
+        """Send a control message through the configured callback."""
+        if not self._send_callback:
+            return
+
+        result = self._send_callback(data)
+        if inspect.isawaitable(result):
+            await result
     
     def _get_next_request_id(self) -> int:
         """Get next available request ID."""
@@ -256,8 +266,7 @@ class MOQSession:
         )
         
         data = msg.encode()
-        if self._send_callback:
-            self._send_callback(data)
+        await self._send_control_message(data)
         
         logger.info(f"Sent SETUP: version={self.version}, role={role.name}")
     
@@ -309,8 +318,7 @@ class MOQSession:
         self.subscriptions[request_id] = subscription
         
         data = msg.encode()
-        if self._send_callback:
-            self._send_callback(data)
+        await self._send_control_message(data)
         
         logger.info(f"Sent SUBSCRIBE: request_id={request_id}, track_alias={track_alias}")
         return request_id
@@ -329,8 +337,7 @@ class MOQSession:
         )
         
         data = msg.encode()
-        if self._send_callback:
-            self._send_callback(data)
+        await self._send_control_message(data)
         
         logger.info(f"Sent SUBSCRIBE_OK: request_id={request_id}")
     
@@ -361,8 +368,7 @@ class MOQSession:
         self.publications[request_id] = publication
         
         data = msg.encode()
-        if self._send_callback:
-            self._send_callback(data)
+        await self._send_control_message(data)
         
         logger.info(f"Sent PUBLISH: request_id={request_id}, track_alias={track_alias}")
         return request_id
@@ -372,8 +378,7 @@ class MOQSession:
         msg = PublishOkMessage(request_id=request_id)
         
         data = msg.encode()
-        if self._send_callback:
-            self._send_callback(data)
+        await self._send_control_message(data)
         
         logger.info(f"Sent PUBLISH_OK: request_id={request_id}")
     
@@ -386,8 +391,7 @@ class MOQSession:
         )
         
         data = msg.encode()
-        if self._send_callback:
-            self._send_callback(data)
+        await self._send_control_message(data)
         
         logger.info(f"Sent PUBLISH_DONE: request_id={request_id}, status={status_code}")
     
@@ -440,8 +444,7 @@ class MOQSession:
         logger.info(f"Prepared FETCH: request_id={request_id}, track_alias={track_alias}")
         
         data = msg.encode()
-        if self._send_callback:
-            self._send_callback(data)
+        await self._send_control_message(data)
         
         logger.info(f"Sent FETCH: request_id={request_id}")
         return request_id
@@ -461,8 +464,7 @@ class MOQSession:
         )
         
         data = msg.encode()
-        if self._send_callback:
-            self._send_callback(data)
+        await self._send_control_message(data)
         
         logger.info(f"Sent FETCH_OK: request_id={request_id}")
     
@@ -475,8 +477,7 @@ class MOQSession:
         )
         
         data = msg.encode()
-        if self._send_callback:
-            self._send_callback(data)
+        await self._send_control_message(data)
         
         logger.info(f"Sent REQUEST_ERROR: request_id={request_id}, code={error_code.name}")
     

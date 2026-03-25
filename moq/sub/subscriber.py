@@ -235,11 +235,11 @@ class MOQSubscriber:
         
         return request_id
     
-    def _send_data(self, data: bytes):
+    async def _send_data(self, data: bytes):
         """Send data over QUIC control stream."""
         if self._client:
             # Use stream 0 for control messages
-            asyncio.create_task(self._client.send_stream_data(0, data))
+            await self._client.send_stream_data(0, data)
     
     async def _handle_stream_data(self, protocol, data: StreamData):
         """Handle incoming stream data."""
