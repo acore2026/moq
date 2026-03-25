@@ -29,8 +29,7 @@
 - [`examples/subscriber_example.py`](/home/acn/cxr/moq-py/examples/subscriber_example.py)
 - [`examples/fetch_example.py`](/home/acn/cxr/moq-py/examples/fetch_example.py)
 - [`examples/reconnection_example.py`](/home/acn/cxr/moq-py/examples/reconnection_example.py)
-- [`examples/integration_example.py`](/home/acn/cxr/moq-py/examples/integration_example.py)
-- [`examples/TEST_CASES_CN.md`](/home/acn/cxr/moq-py/examples/TEST_CASES_CN.md)
+- [`examples/README.md`](/home/acn/cxr/moq-py/examples/README.md)
 
 ## 2. 系统架构
 

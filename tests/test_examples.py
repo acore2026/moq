@@ -5,8 +5,6 @@ from pathlib import Path
 EXAMPLES = [
     "basic_example.py",
     "fetch_example.py",
-    "integration_example.py",
-    "external_usage_example.py",
     "publisher_example.py",
     "reconnection_example.py",
     "relay_example.py",

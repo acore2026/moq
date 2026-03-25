@@ -201,7 +201,6 @@ python examples/reconnection_example.py subscriber
 更完整的示例说明请查看：
 
 - [`examples/README.md`](/home/acn/cxr/moq-py/examples/README.md)
-- [`examples/TEST_CASES_CN.md`](/home/acn/cxr/moq-py/examples/TEST_CASES_CN.md)
 
 Subscriber 会自动模拟断线重连，你会看到类似输出：
 ```
@@ -477,7 +476,7 @@ sudo iptables -L | grep 4443
 1. **阅读架构文档**: `docs/ARCHITECTURE.md`
 2. **查看 API 文档**: `docs/API.md`
 3. **阅读完整 README**: `README.md`
-4. **开发自定义应用**: 优先参考 `examples/integration_example.py`
+4. **开发自定义应用**: 优先参考 `examples/README.md` 中的 External Project Usage 部分
 
 ---
 

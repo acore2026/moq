@@ -481,7 +481,6 @@ class SessionState(IntEnum):
 如果你想直接运行代码而不是只看接口定义，优先参考：
 
 - [`examples/README.md`](/home/acn/cxr/moq-py/examples/README.md)
-- [`examples/TEST_CASES_CN.md`](/home/acn/cxr/moq-py/examples/TEST_CASES_CN.md)
 
 推荐入口：
 
@@ -490,7 +489,6 @@ class SessionState(IntEnum):
 - [`examples/subscriber_example.py`](/home/acn/cxr/moq-py/examples/subscriber_example.py)
 - [`examples/fetch_example.py`](/home/acn/cxr/moq-py/examples/fetch_example.py)
 - [`examples/reconnection_example.py`](/home/acn/cxr/moq-py/examples/reconnection_example.py)
-- [`examples/integration_example.py`](/home/acn/cxr/moq-py/examples/integration_example.py)
 
 ---
 

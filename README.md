@@ -46,14 +46,12 @@ moq-py/
 │       └── subscriber.py   # Subscriber 实现
 ├── examples/                # 示例代码
 │   ├── _bootstrap.py        # 示例共享启动逻辑
-│   ├── README.md            # 示例总览
-│   ├── TEST_CASES_CN.md     # 示例用例说明
+│   ├── README.md            # 示例总览与使用说明
 │   ├── relay_example.py     # Relay 启动示例
 │   ├── publisher_example.py  # 发布端示例
 │   ├── subscriber_example.py # 订阅端示例
 │   ├── fetch_example.py     # 历史拉取示例
 │   ├── reconnection_example.py  # 断线重连示例
-│   ├── integration_example.py    # 外部集成示例
 │   └── basic_example.py     # 一体化演示示例
 ├── tests/                   # 测试代码
 ├── docs/                    # 文档
@@ -225,7 +223,6 @@ python examples/reconnection_example.py subscriber
 如果需要一次性查看全部脚本的定位，请参考：
 
 - [`examples/README.md`](/home/acn/cxr/moq-py/examples/README.md)
-- [`examples/TEST_CASES_CN.md`](/home/acn/cxr/moq-py/examples/TEST_CASES_CN.md)
 
 ### 3. PyCharm 开发环境配置
 
