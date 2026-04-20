@@ -1,0 +1,421 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>MOQ WebSocket Video Player</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
+            min-height: 100vh;
+            color: #fff;
+            padding: 20px;
+        }
+
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+        }
+
+        h1 {
+            text-align: center;
+            margin-bottom: 10px;
+            background: linear-gradient(45deg, #00d4ff, #7b2cbf);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
+
+        .subtitle {
+            text-align: center;
+            color: #888;
+            margin-bottom: 30px;
+        }
+
+        .connection-panel {
+            background: rgba(255, 255, 255, 0.05);
+            border-radius: 12px;
+            padding: 20px;
+            margin-bottom: 20px;
+            border: 1px solid rgba(255, 255, 255, 0.1);
+        }
+
+        .form-group {
+            margin-bottom: 15px;
+        }
+
+        label {
+            display: block;
+            margin-bottom: 5px;
+            color: #aaa;
+        }
+
+        input[type="text"], select {
+            width: 100%;
+            padding: 10px 15px;
+            border: 1px solid rgba(255, 255, 255, 0.2);
+            border-radius: 8px;
+            background: rgba(0, 0, 0, 0.3);
+            color: #fff;
+            font-size: 1rem;
+        }
+
+        input[type="text"]:focus, select:focus {
+            outline: none;
+            border-color: #00d4ff;
+        }
+
+        .button-group {
+            display: flex;
+            gap: 10px;
+            flex-wrap: wrap;
+        }
+
+        button {
+            padding: 12px 30px;
+            border: none;
+            border-radius: 8px;
+            font-size: 1rem;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.3s;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+        }
+
+        .btn-primary {
+            background: linear-gradient(45deg, #00d4ff, #7b2cbf);
+            color: #fff;
+        }
+
+        .btn-primary:hover:not(:disabled) {
+            transform: scale(1.05);
+            box-shadow: 0 5px 20px rgba(0, 212, 255, 0.4);
+        }
+
+        .btn-primary:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+
+        .btn-danger {
+            background: linear-gradient(45deg, #f87171, #dc2626);
+            color: #fff;
+        }
+
+        .btn-danger:hover:not(:disabled) {
+            transform: scale(1.05);
+            box-shadow: 0 5px 20px rgba(248, 113, 113, 0.4);
+        }
+
+        .video-container {
+            background: rgba(255, 255, 255, 0.05);
+            border-radius: 12px;
+            padding: 20px;
+            margin-bottom: 20px;
+            border: 1px solid rgba(255, 255, 255, 0.1);
+        }
+
+        video {
+            width: 100%;
+            border-radius: 8px;
+            background: #000;
+            aspect-ratio: 16/9;
+        }
+
+        .stats-panel {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+            gap: 15px;
+            margin-bottom: 20px;
+        }
+
+        .stat-card {
+            background: rgba(255, 255, 255, 0.05);
+            border-radius: 8px;
+            padding: 15px;
+            border: 1px solid rgba(255, 255, 255, 0.1);
+        }
+
+        .stat-label {
+            color: #888;
+            font-size: 0.8rem;
+            text-transform: uppercase;
+            margin-bottom: 5px;
+        }
+
+        .stat-value {
+            font-size: 1.5rem;
+            font-weight: 700;
+        }
+
+        .status-indicator {
+            display: inline-block;
+            width: 10px;
+            height: 10px;
+            border-radius: 50%;
+            margin-right: 8px;
+        }
+
+        .status-connected { background: #4ade80; box-shadow: 0 0 10px #4ade80; }
+        .status-connecting { background: #fbbf24; animation: blink 1s infinite; }
+        .status-disconnected { background: #f87171; }
+
+        @keyframes blink {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.3; }
+        }
+
+        .log-container {
+            background: rgba(0, 0, 0, 0.5);
+            border-radius: 8px;
+            padding: 15px;
+            height: 200px;
+            overflow-y: auto;
+            font-family: 'Courier New', monospace;
+            font-size: 0.85rem;
+        }
+
+        .log-entry {
+            padding: 2px 0;
+            color: #aaa;
+        }
+
+        .log-entry.info { color: #00d4ff; }
+        .log-entry.success { color: #4ade80; }
+        .log-entry.error { color: #f87171; }
+        .log-entry.warn { color: #fbbf24; }
+
+        .hidden { display: none; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🎬 MOQ WebSocket Video Player</h1>
+        <p class="subtitle">Real-time Video Streaming via WebSocket</p>
+
+        <div class="connection-panel">
+            <div class="form-group">
+                <label>WebSocket Server URL</label>
+                <input type="text" id="wsUrl" value="ws://localhost:8765/ws" placeholder="ws://localhost:8765/ws">
+            </div>
+            <div class="form-group">
+                <label>Stream ID</label>
+                <input type="text" id="streamId" value="mystream" placeholder="Enter stream ID">
+            </div>
+            <div class="button-group">
+                <button class="btn-primary" id="connectBtn" onclick="connect()">Connect</button>
+                <button class="btn-danger" id="disconnectBtn" onclick="disconnect()" disabled>Disconnect</button>
+            </div>
+            <div style="margin-top: 15px;">
+                <span id="statusIndicator" class="status-indicator status-disconnected"></span>
+                <span id="statusText">Disconnected</span>
+            </div>
+        </div>
+
+        <div class="video-container">
+            <video id="videoPlayer" controls autoplay muted>
+                <source id="videoSource" src="" type="video/mp4">
+                Your browser does not support the video tag.
+            </video>
+        </div>
+
+        <div class="stats-panel">
+            <div class="stat-card">
+                <div class="stat-label">Received Chunks</div>
+                <div class="stat-value" id="chunkCount">0</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-label">Bytes Received</div>
+                <div class="stat-value" id="byteCount">0</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-label">Bitrate (Mbps)</div>
+                <div class="stat-value" id="bitrate">0</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-label">Latency (ms)</div>
+                <div class="stat-value" id="latency">0</div>
+            </div>
+        </div>
+
+        <div class="log-container" id="logContainer">
+            <div class="log-entry info">Ready to connect...</div>
+        </div>
+    </div>
+
+    <script>
+        let ws = null;
+        let mediaSource = null;
+        let sourceBuffer = null;
+        let chunks = [];
+        let totalBytes = 0;
+        let startTime = null;
+        let receivedChunks = 0;
+
+        function log(message, type = 'info') {
+            const container = document.getElementById('logContainer');
+            const entry = document.createElement('div');
+            entry.className = `log-entry ${type}`;
+            entry.textContent = `[${new Date().toLocaleTimeString()}] ${message}`;
+            container.appendChild(entry);
+            container.scrollTop = container.scrollHeight;
+        }
+
+        function updateStatus(status) {
+            const indicator = document.getElementById('statusIndicator');
+            const text = document.getElementById('statusText');
+            const connectBtn = document.getElementById('connectBtn');
+            const disconnectBtn = document.getElementById('disconnectBtn');
+
+            if (status === 'connected') {
+                indicator.className = 'status-indicator status-connected';
+                text.textContent = 'Connected';
+                connectBtn.disabled = true;
+                disconnectBtn.disabled = false;
+            } else if (status === 'connecting') {
+                indicator.className = 'status-indicator status-connecting';
+                text.textContent = 'Connecting...';
+                connectBtn.disabled = true;
+                disconnectBtn.disabled = false;
+            } else {
+                indicator.className = 'status-indicator status-disconnected';
+                text.textContent = 'Disconnected';
+                connectBtn.disabled = false;
+                disconnectBtn.disabled = true;
+            }
+        }
+
+        function updateStats() {
+            document.getElementById('chunkCount').textContent = receivedChunks;
+            document.getElementById('byteCount').textContent = formatBytes(totalBytes);
+            
+            if (startTime) {
+                const duration = (Date.now() - startTime) / 1000;
+                const bitrate = (totalBytes * 8) / (duration * 1000000);
+                document.getElementById('bitrate').textContent = bitrate.toFixed(2);
+            }
+        }
+
+        function formatBytes(bytes) {
+            if (bytes === 0) return '0 B';
+            const k = 1024;
+            const sizes = ['B', 'KB', 'MB', 'GB'];
+            const i = Math.floor(Math.log(bytes) / Math.log(k));
+            return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
+        }
+
+        async function connect() {
+            const url = document.getElementById('wsUrl').value;
+            const streamId = document.getElementById('streamId').value;
+
+            if (!url || !streamId) {
+                log('Please enter WebSocket URL and Stream ID', 'error');
+                return;
+            }
+
+            updateStatus('connecting');
+            log(`Connecting to ${url}...`);
+
+            try {
+                ws = new WebSocket(url);
+                ws.binaryType = 'arraybuffer';
+
+                ws.onopen = () => {
+                    log('WebSocket connected', 'success');
+                    updateStatus('connected');
+                    startTime = Date.now();
+                    
+                    // Subscribe to stream
+                    ws.send(JSON.stringify({
+                        type: 'subscribe',
+                        stream_id: streamId
+                    }));
+                    log(`Subscribed to stream: ${streamId}`);
+                };
+
+                ws.onmessage = (event) => {
+                    if (event.data instanceof ArrayBuffer) {
+                        // Binary data (video chunk)
+                        handleVideoData(new Uint8Array(event.data));
+                    } else {
+                        // Text message (JSON)
+                        const msg = JSON.parse(event.data);
+                        handleMessage(msg);
+                    }
+                };
+
+                ws.onerror = (error) => {
+                    log('WebSocket error', 'error');
+                    updateStatus('disconnected');
+                };
+
+                ws.onclose = () => {
+                    log('WebSocket disconnected', 'warn');
+                    updateStatus('disconnected');
+                };
+
+            } catch (error) {
+                log(`Connection failed: ${error.message}`, 'error');
+                updateStatus('disconnected');
+            }
+        }
+
+        function handleMessage(msg) {
+            switch (msg.type) {
+                case 'subscribe_ack':
+                    log(`Subscribed to stream: ${msg.stream_id}`, 'success');
+                    break;
+                case 'stream_end':
+                    log('Stream ended', 'warn');
+                    break;
+                case 'error':
+                    log(`Error: ${msg.message}`, 'error');
+                    break;
+                default:
+                    log(`Received: ${JSON.stringify(msg)}`);
+            }
+        }
+
+        function handleVideoData(data) {
+            chunks.push(data);
+            totalBytes += data.length;
+            receivedChunks++;
+            updateStats();
+
+            // Here you would typically append to MSE (Media Source Extensions)
+            // For now, we just collect the data
+            if (receivedChunks % 30 === 0) {
+                log(`Received ${receivedChunks} chunks (${formatBytes(totalBytes)})`);
+            }
+        }
+
+        function disconnect() {
+            if (ws) {
+                const streamId = document.getElementById('streamId').value;
+                ws.send(JSON.stringify({
+                    type: 'unsubscribe',
+                    stream_id: streamId
+                }));
+                ws.close();
+                ws = null;
+            }
+            updateStatus('disconnected');
+            log('Disconnected');
+        }
+
+        // Cleanup on page unload
+        window.onbeforeunload = () => {
+            if (ws) {
+                ws.close();
+            }
+        };
+    </script>
+</body>
+</html>
