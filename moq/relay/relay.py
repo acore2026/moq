@@ -21,12 +21,15 @@ from moq.messages import (
     SubscribeMessage, PublishMessage, ObjectHeader, ObjectDatagram,
     SubscribeOkMessage, PublishOkMessage, PublishDoneMessage,
     decode_control_message, GroupOrder, FetchMessage, FetchOkMessage,
-    RequestErrorMessage, ErrorCode
+    RequestErrorMessage, ErrorCode, SubgroupHeader, SubgroupObject,
+    StreamType, ObjectStatus
 )
 from moq.encoding import FullTrackName, Location, VarInt
 from moq.transport import QUICServer, StreamData, DatagramData, is_quic_available
 
 logger = logging.getLogger(__name__)
+
+STREAM_FORWARD_FLUSH_SIZE = 1024 * 1024
 
 
 @dataclass
@@ -79,12 +82,27 @@ class ClientSession:
     publications: Dict[FullTrackName, dict] = None
     control_stream_id: Optional[int] = None
     control_buffer: bytes = b""
+    data_streams: Dict[int, dict] = None
     
     def __post_init__(self):
         if self.subscriptions is None:
             self.subscriptions = {}
         if self.publications is None:
             self.publications = {}
+        if self.data_streams is None:
+            self.data_streams = {}
+
+
+@dataclass
+class InboundDataStream:
+    """Incremental parser and forwarding state for an incoming data stream."""
+    parse_buffer: bytearray = field(default_factory=bytearray)
+    forward_buffer: bytearray = field(default_factory=bytearray)
+    stream_type: Optional[int] = None
+    subgroup_header: Optional[object] = None
+    track_name: Optional[FullTrackName] = None
+    downstream_streams: Dict[str, int] = field(default_factory=dict)
+    downstream_header_written: bool = False
 
 
 class ObjectCache:
@@ -460,7 +478,7 @@ class MOQRelay:
         if stream_data.stream_id == client.control_stream_id:
             await self._handle_control_stream_data(client, stream_data.data, end_stream=stream_data.end_stream)
         else:
-            await self._handle_message(client, stream_data.data)
+            await self._handle_data_stream(client, stream_data)
     
     async def _on_quic_datagram(self, protocol, datagram_data: DatagramData):
         """Handle data received as QUIC datagram."""
@@ -468,7 +486,95 @@ class MOQRelay:
         
         # Process the message
         await self._handle_message(client, datagram_data.data)
-    
+
+    async def _handle_data_stream(self, client: ClientSession, stream_data: StreamData):
+        """Handle an incoming QUIC data stream incrementally."""
+        state = client.data_streams.get(stream_data.stream_id)
+        if state is None:
+            state = InboundDataStream()
+            client.data_streams[stream_data.stream_id] = state
+
+        state.parse_buffer.extend(stream_data.data)
+
+        try:
+            await self._parse_data_stream(client, state, end_stream=stream_data.end_stream)
+        except ValueError:
+            pass
+        except Exception as e:
+            logger.warning(
+                f"Failed to parse data stream {stream_data.stream_id} from {client.session_id}: {e}"
+            )
+
+        if state.track_name and (
+            len(state.forward_buffer) >= STREAM_FORWARD_FLUSH_SIZE
+            or stream_data.end_stream
+        ):
+            await self._flush_forward_buffer(
+                state.track_name,
+                state,
+                end_stream=stream_data.end_stream,
+            )
+
+        if stream_data.end_stream:
+            if state.parse_buffer:
+                logger.warning(
+                    f"Data stream {stream_data.stream_id} from {client.session_id} ended "
+                    f"with {len(state.parse_buffer)} buffered bytes"
+                )
+            client.data_streams.pop(stream_data.stream_id, None)
+
+    async def _parse_data_stream(
+        self,
+        client: ClientSession,
+        state: InboundDataStream,
+        end_stream: bool = False
+    ):
+        """Parse incoming stream bytes far enough to identify and cache subgroup objects."""
+        buffer = state.parse_buffer
+
+        if state.stream_type is None:
+            stream_type, consumed = VarInt.decode(buffer, 0)
+            state.stream_type = stream_type
+            del buffer[:consumed]
+
+        if state.stream_type != StreamType.SUBGROUP_HEADER:
+            raise RuntimeError(f"unsupported stream type {state.stream_type}")
+
+        if state.subgroup_header is None:
+            header, consumed = SubgroupHeader.decode(buffer, 0)
+            state.subgroup_header = header
+            del buffer[:consumed]
+
+            for track_name, publication in client.publications.items():
+                if publication["track_alias"] == header.track_alias:
+                    state.track_name = track_name
+                    break
+
+            if state.track_name is None:
+                raise RuntimeError(f"unknown track alias {header.track_alias}")
+
+        header = state.subgroup_header
+
+        while buffer:
+            try:
+                subgroup_obj, consumed = SubgroupObject.decode(buffer, 0)
+            except ValueError:
+                break
+
+            del buffer[:consumed]
+            await self._store_object(
+                state.track_name,
+                ObjectHeader(
+                    track_alias=header.track_alias,
+                    group_id=header.group_id,
+                    object_id=subgroup_obj.object_id,
+                    publisher_priority=header.publisher_priority,
+                    object_status=subgroup_obj.object_status,
+                ),
+                subgroup_obj.payload,
+            )
+            self._append_forward_subgroup_object(state, subgroup_obj)
+
     async def _handle_message(self, client: ClientSession, data: bytes):
         """Handle a message from a client."""
         try:
@@ -694,21 +800,30 @@ class MOQRelay:
             logger.warning(f"Received object for unknown track alias: {obj.header.track_alias}")
             return
         
-        # Cache the object for future fetches
-        await self._cache_object(track_name, obj)
-        
-        # Also cache in the ObjectCache for advanced caching features
-        cached_obj = CachedObject(
-            track_alias=obj.header.track_alias,
-            group_id=obj.header.group_id,
-            object_id=obj.header.object_id,
-            publisher_priority=obj.header.publisher_priority,
-            payload=obj.payload
-        )
-        self.cache.put(track_name, cached_obj)
+        await self._store_object(track_name, obj.header, obj.payload)
         
         # Forward to all subscribers
         await self._forward_object(track_name, obj)
+
+    async def _store_object(self, track_name: FullTrackName, header: ObjectHeader, payload: bytes):
+        """Persist a parsed object in the relay caches."""
+        datagram = ObjectDatagram(header=header, payload=payload)
+        await self._cache_object(track_name, datagram)
+
+        cached_obj = CachedObject(
+            track_alias=header.track_alias,
+            group_id=header.group_id,
+            object_id=header.object_id,
+            publisher_priority=header.publisher_priority,
+            payload=payload
+        )
+        self.cache.put(track_name, cached_obj)
+
+        if self._on_object_received:
+            try:
+                self._on_object_received(track_name, datagram)
+            except Exception as e:
+                logger.error(f"Error in object handler: {e}")
     
     async def _cache_object(self, track_name: FullTrackName, obj: ObjectDatagram):
         """Cache an object for future fetch requests."""
@@ -745,6 +860,55 @@ class MOQRelay:
                         except Exception as e:
                             logger.error(f"Error forwarding to {subscriber.session_id}: {e}")
                 break
+
+    async def _flush_forward_buffer(
+        self,
+        track_name: FullTrackName,
+        state: InboundDataStream,
+        end_stream: bool = False
+    ):
+        """Forward buffered stream bytes to all subscribers in larger batches."""
+        subscribers = self._subscriptions.get(track_name, [])
+        if not subscribers:
+            state.forward_buffer.clear()
+            return
+
+        payload = bytes(state.forward_buffer)
+        state.forward_buffer.clear()
+
+        for subscriber in subscribers:
+            stream_id = state.downstream_streams.get(subscriber.session_id)
+            if stream_id is None:
+                stream_id = subscriber.quic_connection.get_next_available_stream_id(
+                    is_unidirectional=True
+                )
+                state.downstream_streams[subscriber.session_id] = stream_id
+
+            try:
+                subscriber.quic_connection.send_stream_data(
+                    stream_id,
+                    payload,
+                    end_stream=end_stream
+                )
+                if hasattr(subscriber.protocol, 'transmit'):
+                    subscriber.protocol.transmit()
+            except Exception as e:
+                logger.error(f"Error forwarding stream buffer to {subscriber.session_id}: {e}")
+
+    def _append_forward_subgroup_object(
+        self,
+        state: InboundDataStream,
+        subgroup_obj: SubgroupObject,
+    ):
+        """Append a fully parsed subgroup object to the downstream forward buffer."""
+        if not state.downstream_header_written:
+            if state.subgroup_header is None:
+                raise RuntimeError("subgroup header missing while building downstream buffer")
+            state.forward_buffer.extend(VarInt.encode(StreamType.SUBGROUP_HEADER))
+            state.forward_buffer.extend(state.subgroup_header.encode())
+            state.downstream_header_written = True
+
+        state.forward_buffer.extend(subgroup_obj.encode())
     
     async def _forward_object(self, track_name: FullTrackName, obj: ObjectDatagram):
         """Forward an object to all subscribers of a track."""

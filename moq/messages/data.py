@@ -60,6 +60,8 @@ class ObjectHeader:
         object_id, consumed = VarInt.decode(data, offset)
         offset += consumed
         
+        if offset >= len(data):
+            raise ValueError("Insufficient data for object publisher priority")
         publisher_priority = data[offset]
         offset += 1
         
@@ -111,6 +113,8 @@ class ObjectDatagram:
         payload_len, consumed = VarInt.decode(data, offset)
         offset += consumed
         
+        if offset + payload_len > len(data):
+            raise ValueError("Insufficient data for datagram payload")
         payload = data[offset:offset + payload_len]
         offset += payload_len
         
@@ -158,6 +162,8 @@ class SubgroupHeader:
         subgroup_id, consumed = VarInt.decode(data, offset)
         offset += consumed
         
+        if offset >= len(data):
+            raise ValueError("Insufficient data for subgroup publisher priority")
         publisher_priority = data[offset]
         offset += 1
         
@@ -209,6 +215,8 @@ class SubgroupObject:
         else:
             # It's a length
             payload_len = next_val
+            if offset + payload_len > len(data):
+                raise ValueError("Insufficient data for subgroup payload")
             payload = data[offset:offset + payload_len]
             offset += payload_len
         

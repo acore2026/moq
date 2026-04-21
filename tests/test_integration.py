@@ -25,7 +25,8 @@ from moq.encoding import FullTrackName, VarInt
 from moq.messages import (
     SetupMessage, SubscribeMessage, SubscribeOkMessage,
     PublishMessage, PublishOkMessage,
-    ObjectHeader, ObjectDatagram,
+    ObjectHeader, ObjectDatagram, SubgroupHeader, SubgroupObject,
+    StreamType,
     GroupOrder, SubscribeFilter
 )
 from moq.encoding import Parameters
@@ -273,6 +274,145 @@ async def test_relay_reassembles_fragmented_publish():
     assert seen == [("b'relay-test-client'", 3, 11, track_name)]
 
     logger.info("Fragmented PUBLISH handling test passed!\n")
+
+
+@pytest.mark.asyncio
+async def test_subscriber_reassembles_fragmented_subgroup_object():
+    """Test subscriber handles a subgroup object split across QUIC events."""
+    logger.info("Testing fragmented subgroup object handling at subscriber...")
+
+    from moq.sub.subscriber import MOQSubscriber
+
+    subscriber = MOQSubscriber("127.0.0.1", 4443)
+    track_name = FullTrackName([b"live"], b"video")
+    track_alias = 9
+    subscriber._track_aliases[track_alias] = track_name
+
+    payload = b"fragmented-video-payload" * 64
+    encoded = (
+        VarInt.encode(StreamType.SUBGROUP_HEADER)
+        + SubgroupHeader(
+            track_alias=track_alias,
+            group_id=1,
+            subgroup_id=0,
+            publisher_priority=128,
+        ).encode()
+        + SubgroupObject(object_id=1, payload=payload).encode()
+    )
+
+    first_split = 5
+    second_split = len(encoded) - 7
+
+    await subscriber._handle_stream_data(
+        None, StreamData(stream_id=4, data=encoded[:first_split], end_stream=False)
+    )
+    assert subscriber._object_queue.empty()
+
+    await subscriber._handle_stream_data(
+        None,
+        StreamData(
+            stream_id=4,
+            data=encoded[first_split:second_split],
+            end_stream=False,
+        ),
+    )
+    assert subscriber._object_queue.empty()
+
+    await subscriber._handle_stream_data(
+        None, StreamData(stream_id=4, data=encoded[second_split:], end_stream=True)
+    )
+
+    obj = await subscriber.get_next_object(timeout=0.1)
+    assert obj is not None
+    assert obj.group_id == 1
+    assert obj.object_id == 1
+    assert obj.payload == payload
+    assert 4 not in subscriber._data_stream_buffers
+
+    logger.info("Fragmented subgroup object handling test passed!\n")
+
+
+@pytest.mark.asyncio
+async def test_relay_forwards_fragmented_subgroup_stream_on_one_downstream_stream():
+    """Test relay preserves stream continuity when forwarding fragmented subgroup data."""
+    logger.info("Testing fragmented subgroup stream forwarding at relay...")
+
+    from moq.relay.relay import MOQRelay, ClientSession
+
+    class DummyQuicConnection:
+        def __init__(self):
+            self.sent_streams = []
+            self.next_stream_id = 2
+
+        def get_next_available_stream_id(self, is_unidirectional=False):
+            stream_id = self.next_stream_id
+            self.next_stream_id += 4
+            return stream_id
+
+        def send_stream_data(self, stream_id, data, end_stream=False):
+            self.sent_streams.append((stream_id, data, end_stream))
+
+    class DummyProtocol:
+        def __init__(self):
+            self.transmit_calls = 0
+
+        def transmit(self):
+            self.transmit_calls += 1
+
+    relay = MOQRelay(host="127.0.0.1", port=4443, cache_dir="/tmp/moq_test_cache_stream_frag")
+
+    track_name = FullTrackName([b"live"], b"video")
+    track_alias = 11
+    payload = b"relay-forwarded-video" * 128
+    encoded = (
+        VarInt.encode(StreamType.SUBGROUP_HEADER)
+        + SubgroupHeader(
+            track_alias=track_alias,
+            group_id=7,
+            subgroup_id=0,
+            publisher_priority=128,
+        ).encode()
+        + SubgroupObject(object_id=3, payload=payload).encode()
+    )
+
+    publisher = ClientSession(
+        session_id="publisher",
+        protocol=DummyProtocol(),
+        quic_connection=DummyQuicConnection(),
+    )
+    publisher.publications[track_name] = {"track_alias": track_alias, "request_id": 1}
+
+    subscriber = ClientSession(
+        session_id="subscriber",
+        protocol=DummyProtocol(),
+        quic_connection=DummyQuicConnection(),
+    )
+    relay._subscriptions[track_name] = [subscriber]
+
+    first_split = 4
+    second_split = len(encoded) - 9
+
+    await relay._handle_data_stream(
+        publisher,
+        StreamData(stream_id=6, data=encoded[:first_split], end_stream=False),
+    )
+    await relay._handle_data_stream(
+        publisher,
+        StreamData(stream_id=6, data=encoded[first_split:second_split], end_stream=False),
+    )
+    await relay._handle_data_stream(
+        publisher,
+        StreamData(stream_id=6, data=encoded[second_split:], end_stream=True),
+    )
+
+    sent = subscriber.quic_connection.sent_streams
+    assert len(sent) == 1
+    assert len({stream_id for stream_id, _, _ in sent}) == 1
+    assert b"".join(chunk for _, chunk, _ in sent) == encoded
+    assert sent[-1][2] is True
+    assert relay._object_cache[track_name][0]["payload"] == payload
+
+    logger.info("Fragmented subgroup stream forwarding test passed!\n")
 
 
 @pytest.mark.asyncio

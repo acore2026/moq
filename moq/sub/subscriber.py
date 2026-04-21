@@ -63,6 +63,10 @@ class MOQSubscriber:
         # Object delivery queue
         self._object_queue: asyncio.Queue = asyncio.Queue()
         self._control_buffer = b""
+        self._data_stream_buffers: Dict[int, bytearray] = {}
+        self._data_stream_types: Dict[int, int] = {}
+        self._subgroup_headers: Dict[int, SubgroupHeader] = {}
+        self._fetch_headers: Dict[int, object] = {}
         
         logger.info(f"MOQSubscriber initialized for {relay_host}:{relay_port}")
     
@@ -251,7 +255,7 @@ class MOQSubscriber:
             await self._handle_control_data(data.data, end_stream=data.end_stream)
         else:
             # Data stream - could be subgroup or fetch stream
-            await self._handle_data_stream(data.stream_id, data.data)
+            await self._handle_data_stream(data.stream_id, data.data, end_stream=data.end_stream)
     
     async def _handle_control_data(self, data: bytes, end_stream: bool = False):
         """Handle control message data."""
@@ -322,104 +326,121 @@ class MOQSubscriber:
                 if track_alias is not None:
                     self._track_aliases[track_alias] = track_name
     
-    async def _handle_data_stream(self, stream_id: int, data: bytes):
+    async def _handle_data_stream(self, stream_id: int, data: bytes, end_stream: bool = False):
         """Handle data from a data stream."""
+        buffer = self._data_stream_buffers.setdefault(stream_id, bytearray())
+        buffer.extend(data)
+
         try:
-            offset = 0
-            
-            # Read stream type
-            stream_type, consumed = VarInt.decode(data, offset)
-            offset += consumed
-            
+            if stream_id not in self._data_stream_types:
+                stream_type, consumed = VarInt.decode(buffer, 0)
+                self._data_stream_types[stream_id] = stream_type
+                del buffer[:consumed]
+
+            stream_type = self._data_stream_types[stream_id]
+
             if stream_type == StreamType.SUBGROUP_HEADER:
-                # Subgroup stream
-                await self._handle_subgroup_stream(stream_id, data, offset)
+                await self._handle_subgroup_stream(stream_id, buffer)
             elif stream_type == StreamType.FETCH_HEADER:
-                # Fetch stream
-                await self._handle_fetch_stream(stream_id, data, offset)
+                await self._handle_fetch_stream(stream_id, buffer)
             else:
                 logger.warning(f"Unknown stream type: {stream_type}")
-                
+                self._cleanup_data_stream(stream_id)
         except Exception as e:
-            logger.warning(f"Failed to handle data stream: {e}")
-    
-    async def _handle_subgroup_stream(self, stream_id: int, data: bytes, offset: int):
+            if end_stream:
+                logger.warning(f"Failed to handle data stream: {e}")
+                self._cleanup_data_stream(stream_id)
+            return
+
+        if end_stream:
+            if buffer:
+                logger.warning(
+                    f"Data stream {stream_id} ended with {len(buffer)} buffered bytes"
+                )
+            self._cleanup_data_stream(stream_id)
+
+    async def _handle_subgroup_stream(self, stream_id: int, buffer: bytearray):
         """Handle subgroup stream data."""
         try:
-            # Parse subgroup header
-            header, consumed = SubgroupHeader.decode(data, offset)
-            offset += consumed
-            
+            if stream_id not in self._subgroup_headers:
+                header, consumed = SubgroupHeader.decode(buffer, 0)
+                self._subgroup_headers[stream_id] = header
+                del buffer[:consumed]
+
+            header = self._subgroup_headers[stream_id]
+
             track_name = self._track_aliases.get(header.track_alias)
             if not track_name:
                 logger.warning(f"Unknown track alias: {header.track_alias}")
                 return
-            
-            # Parse objects
-            while offset < len(data):
+
+            while buffer:
                 try:
-                    obj, consumed = SubgroupObject.decode(data, offset)
-                    offset += consumed
-                    
-                    received_obj = ReceivedObject(
-                        track_alias=header.track_alias,
-                        group_id=header.group_id,
-                        object_id=obj.object_id,
-                        publisher_priority=header.publisher_priority,
-                        payload=obj.payload,
-                        object_status=obj.object_status
-                    )
-                    
-                    await self._object_queue.put(received_obj)
-                    
+                    obj, consumed = SubgroupObject.decode(buffer, 0)
+                    del buffer[:consumed]
+                except ValueError:
+                    break
                 except Exception as e:
                     logger.debug(f"Failed to parse subgroup object: {e}")
                     break
-                    
+
+                received_obj = ReceivedObject(
+                    track_alias=header.track_alias,
+                    group_id=header.group_id,
+                    object_id=obj.object_id,
+                    publisher_priority=header.publisher_priority,
+                    payload=obj.payload,
+                    object_status=obj.object_status
+                )
+
+                await self._object_queue.put(received_obj)
         except Exception as e:
             logger.warning(f"Failed to handle subgroup stream: {e}")
     
-    async def _handle_fetch_stream(self, stream_id: int, data: bytes, offset: int):
+    async def _handle_fetch_stream(self, stream_id: int, buffer: bytearray):
         """Handle fetch stream data."""
         try:
             from moq.messages import FetchHeader, ObjectHeader
             
-            # Parse fetch header
-            header, consumed = FetchHeader.decode(data, offset)
-            offset += consumed
-            
-            logger.debug(f"Fetch stream header: request_id={header.request_id}")
+            if stream_id not in self._fetch_headers:
+                header, consumed = FetchHeader.decode(buffer, 0)
+                self._fetch_headers[stream_id] = header
+                del buffer[:consumed]
+            else:
+                header = self._fetch_headers[stream_id]
+
+            request_id = header.subscribe_id
+            logger.debug(f"Fetch stream header: request_id={request_id}")
             
             # Get fetch request info
             if not self._session:
                 logger.warning("No session available for fetch stream")
                 return
                 
-            fetch_request = self._session.fetches.get(header.request_id)
+            fetch_request = self._session.fetches.get(request_id)
             if not fetch_request:
-                logger.warning(f"Unknown fetch request: {header.request_id}")
+                logger.warning(f"Unknown fetch request: {request_id}")
                 return
             
             track_name = fetch_request.full_track_name
             track_alias = self._session.track_aliases.get(track_name, 0)
             
             # Parse objects in the fetch stream
-            while offset < len(data):
+            while buffer:
                 try:
                     # Parse object header
-                    obj_header, consumed = ObjectHeader.decode(data, offset)
-                    offset += consumed
+                    obj_header, consumed = ObjectHeader.decode(buffer, 0)
+                    payload_offset = consumed
                     
                     # Read payload
-                    payload_len, consumed = VarInt.decode(data, offset)
-                    offset += consumed
+                    payload_len, consumed = VarInt.decode(buffer, payload_offset)
+                    payload_offset += consumed
                     
-                    if offset + payload_len > len(data):
-                        logger.warning("Incomplete payload in fetch stream")
+                    if payload_offset + payload_len > len(buffer):
                         break
                     
-                    payload = data[offset:offset + payload_len]
-                    offset += payload_len
+                    payload = bytes(buffer[payload_offset:payload_offset + payload_len])
+                    del buffer[:payload_offset + payload_len]
                     
                     # Create received object
                     received_obj = ReceivedObject(
@@ -434,12 +455,21 @@ class MOQSubscriber:
                     await self._object_queue.put(received_obj)
                     logger.debug(f"Fetch object received: group={obj_header.group_id}, object={obj_header.object_id}")
                     
+                except ValueError:
+                    break
                 except Exception as e:
                     logger.debug(f"Failed to parse fetch stream object: {e}")
                     break
                     
         except Exception as e:
             logger.warning(f"Failed to handle fetch stream: {e}")
+
+    def _cleanup_data_stream(self, stream_id: int):
+        """Release parser state for a completed or failed data stream."""
+        self._data_stream_buffers.pop(stream_id, None)
+        self._data_stream_types.pop(stream_id, None)
+        self._subgroup_headers.pop(stream_id, None)
+        self._fetch_headers.pop(stream_id, None)
     
     async def _handle_datagram(self, protocol, data: DatagramData):
         """Handle incoming datagram."""

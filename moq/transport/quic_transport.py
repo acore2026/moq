@@ -14,6 +14,10 @@ from dataclasses import dataclass
 
 logger = logging.getLogger(__name__)
 
+DEFAULT_QUIC_MAX_DATA = 64 * 1024 * 1024
+DEFAULT_QUIC_MAX_STREAM_DATA = 64 * 1024 * 1024
+DEFAULT_QUIC_CONGESTION_CONTROL = "cubic"
+
 # Try to import aioquic, provide helpful error if not available
 try:
     from aioquic.asyncio import QuicConnectionProtocol, serve
@@ -135,10 +139,19 @@ class QUICClient:
         self._config = QuicConfiguration(
             alpn_protocols=["moq-00"],
             is_client=True,
+            congestion_control_algorithm=DEFAULT_QUIC_CONGESTION_CONTROL,
+            max_data=DEFAULT_QUIC_MAX_DATA,
+            max_stream_data=DEFAULT_QUIC_MAX_STREAM_DATA,
             max_datagram_frame_size=65536 if use_datagrams else None,
         )
         # Local relay examples use a self-signed certificate.
         self._config.verify_mode = ssl.CERT_NONE
+        logger.info(
+            "QUIC client config: congestion=%s max_data=%d max_stream_data=%d",
+            DEFAULT_QUIC_CONGESTION_CONTROL,
+            DEFAULT_QUIC_MAX_DATA,
+            DEFAULT_QUIC_MAX_STREAM_DATA,
+        )
     
     def set_handlers(self, 
                      on_stream_data: Optional[Callable] = None,
@@ -252,7 +265,16 @@ class QUICServer:
         self._config = QuicConfiguration(
             alpn_protocols=["moq-00"],
             is_client=False,
+            congestion_control_algorithm=DEFAULT_QUIC_CONGESTION_CONTROL,
+            max_data=DEFAULT_QUIC_MAX_DATA,
+            max_stream_data=DEFAULT_QUIC_MAX_STREAM_DATA,
             max_datagram_frame_size=65536 if use_datagrams else None,
+        )
+        logger.info(
+            "QUIC server config: congestion=%s max_data=%d max_stream_data=%d",
+            DEFAULT_QUIC_CONGESTION_CONTROL,
+            DEFAULT_QUIC_MAX_DATA,
+            DEFAULT_QUIC_MAX_STREAM_DATA,
         )
         
         if cert_file and key_file:

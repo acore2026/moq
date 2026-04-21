@@ -11,6 +11,8 @@ behavior, and a single-file quick start.
 | `relay_example.py` | Start a relay and initialize disk-backed cache | Local development and end-to-end testing |
 | `publisher_example.py` | Publish objects over stream and datagram transport | Publisher reference flow |
 | `subscriber_example.py` | Subscribe to a track and receive live objects | Subscriber reference flow |
+| `video_publisher_example.py` | Generate a live timestamped H.264 test stream and publish it as stream objects | Real-time video stream validation |
+| `video_subscriber_example.py` | Reassemble the streamed fragmented MP4 into `receive.mp4` and preview it with `ffplay` | End-to-end live video receive validation |
 | `fetch_example.py` | Fetch historical objects by range | Cache and history validation |
 | `reconnection_example.py` | Reconnect and continue with relay-assisted recovery | Recovery and continuity testing |
 | `basic_example.py` | Run relay, publisher, and subscriber in one file | Fast environment smoke test |
@@ -22,7 +24,8 @@ behavior, and a single-file quick start.
 3. Run `subscriber_example.py` and confirm live delivery.
 4. Run `fetch_example.py` after some objects exist in relay cache.
 5. Run `reconnection_example.py` to validate cache-backed recovery.
-6. Use `basic_example.py` when you want a fast one-process demo.
+6. Run `video_subscriber_example.py` and `video_publisher_example.py` to validate large-object stream delivery.
+7. Use `basic_example.py` when you want a fast one-process demo.
 
 ## Example Details
 
@@ -43,6 +46,18 @@ behavior, and a single-file quick start.
 - Purpose: subscribe to a sample track and print incoming objects.
 - Best for: validating `SUBSCRIBE`, callback wiring, and live object reception.
 - Checkpoints: successful subscribe callback and object receive callback activity.
+
+### `video_publisher_example.py`
+
+- Purpose: use `ffmpeg` to generate a live timestamped test pattern and publish it as H.264 fragmented MP4 over MOQ.
+- Best for: validating real-time stream delivery, QUIC stream fragmentation handling, and live publisher behavior without relying on a source file.
+- Checkpoints: metadata object sent first, live media chunks follow in order, and the relay forwards the subgroup stream correctly.
+
+### `video_subscriber_example.py`
+
+- Purpose: subscribe to the live video track, reconstruct `receive.mp4`, and try to preview the live stream with `ffplay`.
+- Best for: validating incremental object parsing on the subscriber side and end-to-end live media reconstruction.
+- Checkpoints: metadata arrives first, live chunks are written in order, `ffplay` can preview the stream when available, and `ffprobe` can inspect the reconstructed `receive.mp4`.
 
 ### `fetch_example.py`
 
@@ -185,6 +200,8 @@ Run examples from the repository root:
 python examples/relay_example.py
 python examples/publisher_example.py
 python examples/subscriber_example.py
+python examples/video_publisher_example.py
+python examples/video_subscriber_example.py
 python examples/fetch_example.py
 ```
 
