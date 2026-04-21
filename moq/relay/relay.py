@@ -1,12 +1,13 @@
 """
 MOQ Transport - Relay Implementation
 Implements a caching relay for MOQT with memory and disk caching.
-Uses QUIC as the underlying transport protocol.
+Uses QUIC or WebTransport as the underlying transport protocol.
 """
 
 import os
 import json
 import asyncio
+import inspect
 import logging
 import hashlib
 import shutil
@@ -25,7 +26,15 @@ from moq.messages import (
     StreamType, ObjectStatus
 )
 from moq.encoding import FullTrackName, Location, VarInt
-from moq.transport import QUICServer, StreamData, DatagramData, is_quic_available
+from moq.transport import (
+    CombinedTransportServer,
+    QUICServer,
+    WebTransportServer,
+    StreamData,
+    DatagramData,
+    is_quic_available,
+    is_webtransport_available,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -73,14 +82,15 @@ class CachedObject:
 
 @dataclass
 class ClientSession:
-    """Represents a connected client session over QUIC."""
+    """Represents a connected client session over QUIC or WebTransport."""
     session_id: str
     protocol: any  # MOQQuicProtocol instance
-    quic_connection: any  # QuicConnection instance
+    quic_connection: any  # QuicConnection or WebTransport session adapter
     role: Optional[Role] = None
     subscriptions: Dict[FullTrackName, dict] = None
     publications: Dict[FullTrackName, dict] = None
     control_stream_id: Optional[int] = None
+    local_control_stream_id: Optional[int] = None
     control_buffer: bytes = b""
     data_streams: Dict[int, dict] = None
     
@@ -360,14 +370,34 @@ class MOQRelay:
                  cache_dir: Optional[str] = None,
                  max_memory_cache: int = 100 * 1024 * 1024,
                  max_disk_cache: int = 1024 * 1024 * 1024,
+                 transport: str = "quic",
+                 webtransport_port: Optional[int] = None,
+                 webtransport_path: str = "/moq",
                  cert_file: Optional[str] = None,
                  key_file: Optional[str] = None):
         self.host = host
         self.port = port
+        self.transport = transport.lower()
+        self.webtransport_port = (
+            webtransport_port
+            if webtransport_port is not None
+            else port
+        )
+        self.webtransport_path = webtransport_path
         
-        # Check QUIC availability
-        if not is_quic_available():
-            raise RuntimeError("QUIC is not available. Please install aioquic.")
+        if self.transport == "quic":
+            if not is_quic_available():
+                raise RuntimeError("QUIC is not available. Please install aioquic.")
+        elif self.transport == "webtransport":
+            if not is_webtransport_available():
+                raise RuntimeError("WebTransport is not available. Please install aioquic.")
+        elif self.transport == "both":
+            if not is_quic_available():
+                raise RuntimeError("QUIC is not available. Please install aioquic.")
+            if not is_webtransport_available():
+                raise RuntimeError("WebTransport is not available. Please install aioquic.")
+        else:
+            raise ValueError(f"Unsupported transport: {transport}")
         
         # Cache
         self.cache = ObjectCache(
@@ -388,14 +418,40 @@ class MOQRelay:
         self._on_object_received: Optional[Callable] = None
         self._on_object_forwarded: Optional[Callable] = None
         
-        # QUIC Server
-        self._quic_server = QUICServer(
-            host=host,
-            port=port,
-            use_datagrams=True,
-            cert_file=cert_file,
-            key_file=key_file
-        )
+        self._quic_server = None
+        self._webtransport_server = None
+        self._combined_server = None
+
+        if self.transport == "both" and self.webtransport_port == port:
+            self._combined_server = CombinedTransportServer(
+                host=host,
+                port=port,
+                path=webtransport_path,
+                use_datagrams=True,
+                cert_file=cert_file,
+                key_file=key_file,
+            )
+            self._quic_server = self._combined_server
+            self._webtransport_server = self._combined_server
+        elif self.transport in {"quic", "both"}:
+            self._quic_server = QUICServer(
+                host=host,
+                port=port,
+                use_datagrams=True,
+                cert_file=cert_file,
+                key_file=key_file
+            )
+        if self.transport == "webtransport" or (
+            self.transport == "both" and self.webtransport_port != port
+        ):
+            self._webtransport_server = WebTransportServer(
+                host=host,
+                port=self.webtransport_port,
+                path=webtransport_path,
+                use_datagrams=True,
+                cert_file=cert_file,
+                key_file=key_file,
+            )
         
         # Client management
         self._clients: Dict[str, ClientSession] = {}
@@ -405,36 +461,48 @@ class MOQRelay:
         self._max_cached_objects = 1000  # Limit cache size
         self._running = False
         
-        logger.info(f"MOQRelay initialized: {host}:{port} (QUIC)")
+        logger.info(
+            "MOQRelay initialized: host=%s quic_port=%s webtransport_port=%s transport=%s",
+            host,
+            port if self._quic_server is not None else None,
+            self.webtransport_port if self._webtransport_server is not None else None,
+            self.transport,
+        )
     
     async def start(self):
-        """Start the relay server using QUIC transport."""
+        """Start the relay server using the configured transport."""
         self._running = True
 
         # Start each relay process with a clean on-disk cache.
         self.cache.clear_disk_cache()
         
-        # Set up QUIC server handlers
-        self._quic_server.set_handlers(
-            on_client_connect=self._on_quic_client_connect,
-            on_stream_data=self._on_quic_stream_data,
-            on_datagram=self._on_quic_datagram,
-            on_client_disconnect=self._on_quic_client_disconnect
-        )
-        
-        # Start QUIC server
-        await self._quic_server.start()
-        
-        logger.info(f"MOQ Relay running on {self.host}:{self.port} (QUIC)")
+        for server in self._iter_transport_servers():
+            server.set_handlers(
+                on_client_connect=self._on_quic_client_connect,
+                on_stream_data=self._on_quic_stream_data,
+                on_datagram=self._on_quic_datagram,
+                on_client_disconnect=self._on_quic_client_disconnect
+            )
+            await server.start()
+
+        if self._quic_server is not None:
+            logger.info("MOQ Relay QUIC listener on %s:%d", self.host, self.port)
+        if self._webtransport_server is not None:
+            logger.info(
+                "MOQ Relay WebTransport listener on https://%s:%d%s",
+                self.host,
+                self.webtransport_port,
+                self.webtransport_path,
+            )
+        logger.info(f"MOQ Relay running ({self.transport})")
         logger.info("Waiting for connections... (Press Ctrl+C to stop)")
     
     async def stop(self):
         """Stop the relay server."""
         self._running = False
         
-        # Stop the QUIC server
-        if self._quic_server:
-            await self._quic_server.stop()
+        for server in self._iter_transport_servers():
+            await server.stop()
         
         # Close all client connections
         for client in list(self._clients.values()):
@@ -451,24 +519,35 @@ class MOQRelay:
         self.sessions.clear()
         
         logger.info("Relay server stopped")
+
+    def _iter_transport_servers(self):
+        """Yield configured listener instances once each."""
+        seen = set()
+        for server in (self._quic_server, self._webtransport_server):
+            if server is None:
+                continue
+            marker = id(server)
+            if marker in seen:
+                continue
+            seen.add(marker)
+            yield server
     
     async def _on_quic_client_connect(self, protocol):
-        """Handle new QUIC client connection."""
+        """Handle new transport client connection."""
         client = self._get_or_create_client(protocol)
-        logger.info(f"QUIC client connected: {client.session_id}")
+        logger.info(f"Client connected: {client.session_id}")
     
     async def _on_quic_client_disconnect(self, protocol, error_code, reason):
-        """Handle QUIC client disconnection."""
-        # Find client by protocol
+        """Handle transport client disconnection."""
         for session_id, client in list(self._clients.items()):
-            if client.protocol == protocol:
+            if client.protocol == self._resolve_protocol(protocol):
                 await self._cleanup_client(client)
                 break
         
-        logger.info(f"QUIC client disconnected: error_code={error_code}, reason={reason}")
+        logger.info(f"Client disconnected: error_code={error_code}, reason={reason}")
     
     async def _on_quic_stream_data(self, protocol, stream_data: StreamData):
-        """Handle data received on a QUIC stream."""
+        """Handle data received on a transport stream."""
         client = self._get_or_create_client(protocol)
         
         # Set control stream if not set
@@ -481,7 +560,7 @@ class MOQRelay:
             await self._handle_data_stream(client, stream_data)
     
     async def _on_quic_datagram(self, protocol, datagram_data: DatagramData):
-        """Handle data received as QUIC datagram."""
+        """Handle data received as a transport datagram."""
         client = self._get_or_create_client(protocol)
         
         # Process the message
@@ -638,25 +717,82 @@ class MOQRelay:
         else:
             logger.debug(f"Received control message type: {type(msg).__name__}")
 
-    def _get_or_create_client(self, protocol) -> ClientSession:
-        """Find the client session for a protocol, creating it if needed.
+    def _resolve_protocol(self, protocol):
+        """Normalize callback objects to the owning protocol."""
+        return getattr(protocol, "protocol", protocol)
 
-        QUIC connection callbacks are scheduled asynchronously, so the first
-        stream or datagram can arrive before `_on_quic_client_connect` runs.
-        Creating the session lazily here avoids dropping that initial message.
-        """
+    def _resolve_connection(self, protocol):
+        """Normalize callback objects to a connection adapter."""
+        if hasattr(protocol, "open_stream") and hasattr(protocol, "send_stream_data"):
+            return protocol
+        resolved_protocol = self._resolve_protocol(protocol)
+        return getattr(resolved_protocol, "_quic", resolved_protocol)
+
+    def _derive_session_id(self, protocol) -> str:
+        """Build a stable session identifier from the underlying QUIC connection."""
+        resolved_protocol = self._resolve_protocol(protocol)
+        quic = getattr(resolved_protocol, "_quic", None)
+        host_cid = getattr(quic, "host_cid", None)
+        if host_cid is not None:
+            return f"{host_cid}"
+        return f"client-{id(protocol)}"
+
+    async def _open_stream(self, client: ClientSession, unidirectional: bool) -> int:
+        """Open a stream on either a native QUIC or WebTransport connection."""
+        open_stream = getattr(client.quic_connection, "open_stream", None)
+        if callable(open_stream):
+            result = open_stream(unidirectional=unidirectional)
+            if inspect.isawaitable(result):
+                return await result
+            return result
+        get_next_stream_id = getattr(client.quic_connection, "get_next_available_stream_id", None)
+        if callable(get_next_stream_id):
+            return get_next_stream_id(is_unidirectional=unidirectional)
+        if client.control_stream_id is not None:
+            return client.control_stream_id
+        raise AttributeError("connection does not support opening streams")
+
+    async def _send_stream_bytes(
+        self,
+        client: ClientSession,
+        stream_id: int,
+        data: bytes,
+        end_stream: bool = False,
+    ) -> None:
+        """Send bytes on a stream regardless of connection type."""
+        result = client.quic_connection.send_stream_data(stream_id, data, end_stream=end_stream)
+        if inspect.isawaitable(result):
+            await result
+        elif hasattr(client.protocol, "transmit"):
+            client.protocol.transmit()
+
+    async def _send_datagram_bytes(self, client: ClientSession, data: bytes) -> None:
+        """Send a datagram regardless of connection type."""
+        send_datagram = getattr(client.quic_connection, "send_datagram", None)
+        if callable(send_datagram):
+            result = send_datagram(data)
+        else:
+            result = client.quic_connection.send_datagram_frame(data)
+        if inspect.isawaitable(result):
+            await result
+        elif hasattr(client.protocol, "transmit"):
+            client.protocol.transmit()
+
+    def _get_or_create_client(self, protocol) -> ClientSession:
+        """Find the client session for a transport callback, creating it if needed."""
+        resolved_protocol = self._resolve_protocol(protocol)
         for client in self._clients.values():
-            if client.protocol == protocol:
+            if client.protocol == resolved_protocol:
                 return client
 
-        session_id = f"{protocol._quic.host_cid}"
+        session_id = self._derive_session_id(protocol)
         client = ClientSession(
             session_id=session_id,
-            protocol=protocol,
-            quic_connection=protocol._quic
+            protocol=resolved_protocol,
+            quic_connection=self._resolve_connection(protocol),
         )
         self._clients[session_id] = client
-        logger.info(f"QUIC client registered lazily: {session_id}")
+        logger.info(f"Client registered lazily: {session_id}")
         return client
     
     async def _handle_publish(self, client: ClientSession, msg: PublishMessage):
@@ -879,19 +1015,16 @@ class MOQRelay:
         for subscriber in subscribers:
             stream_id = state.downstream_streams.get(subscriber.session_id)
             if stream_id is None:
-                stream_id = subscriber.quic_connection.get_next_available_stream_id(
-                    is_unidirectional=True
-                )
+                stream_id = await self._open_stream(subscriber, unidirectional=True)
                 state.downstream_streams[subscriber.session_id] = stream_id
 
             try:
-                subscriber.quic_connection.send_stream_data(
+                await self._send_stream_bytes(
+                    subscriber,
                     stream_id,
                     payload,
                     end_stream=end_stream
                 )
-                if hasattr(subscriber.protocol, 'transmit'):
-                    subscriber.protocol.transmit()
             except Exception as e:
                 logger.error(f"Error forwarding stream buffer to {subscriber.session_id}: {e}")
 
@@ -937,19 +1070,19 @@ class MOQRelay:
                 logger.error(f"Error in forward handler: {e}")
     
     async def _send_control_message(self, client: ClientSession, data: bytes):
-        """Send a message to a client over QUIC."""
+        """Send a message to a client over the negotiated transport."""
         try:
-            if client.control_stream_id is not None:
-                # Send on control stream
-                client.quic_connection.send_stream_data(client.control_stream_id, data)
-            else:
-                # Open a new stream or use datagram
-                stream_id = client.quic_connection.get_next_available_stream_id(is_unidirectional=False)
-                client.quic_connection.send_stream_data(stream_id, data)
-            
-            # Transmit the data
-            if hasattr(client.protocol, 'transmit'):
-                client.protocol.transmit()
+            if client.local_control_stream_id is None:
+                client.local_control_stream_id = await self._open_stream(
+                    client,
+                    unidirectional=True,
+                )
+
+            await self._send_stream_bytes(
+                client,
+                client.local_control_stream_id,
+                data,
+            )
             
             logger.debug(f"Sent {len(data)} bytes to {client.session_id}")
         except Exception as e:
@@ -957,11 +1090,9 @@ class MOQRelay:
             raise
 
     async def _send_datagram(self, client: ClientSession, data: bytes):
-        """Send a datagram to a client over QUIC."""
+        """Send a datagram to a client over the negotiated transport."""
         try:
-            client.quic_connection.send_datagram_frame(data)
-            if hasattr(client.protocol, 'transmit'):
-                client.protocol.transmit()
+            await self._send_datagram_bytes(client, data)
             logger.debug(f"Sent datagram {len(data)} bytes to {client.session_id}")
         except Exception as e:
             logger.error(f"Error sending datagram to {client.session_id}: {e}")
@@ -970,10 +1101,8 @@ class MOQRelay:
     async def _send_data_stream(self, client: ClientSession, data: bytes):
         """Send opaque raw data on a fresh unidirectional stream."""
         try:
-            stream_id = client.quic_connection.get_next_available_stream_id(is_unidirectional=True)
-            client.quic_connection.send_stream_data(stream_id, data, end_stream=True)
-            if hasattr(client.protocol, 'transmit'):
-                client.protocol.transmit()
+            stream_id = await self._open_stream(client, unidirectional=True)
+            await self._send_stream_bytes(client, stream_id, data, end_stream=True)
             logger.debug(f"Sent raw stream {len(data)} bytes to {client.session_id} on stream {stream_id}")
         except Exception as e:
             logger.error(f"Error sending raw stream data to {client.session_id}: {e}")

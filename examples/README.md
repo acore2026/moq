@@ -9,8 +9,12 @@ behavior, and a single-file quick start.
 | File | Goal | Typical usage |
 | --- | --- | --- |
 | `relay_example.py` | Start a relay and initialize disk-backed cache | Local development and end-to-end testing |
+| `dual_transport_relay_example.py` | Start one relay instance with native QUIC and WebTransport on the same port | Mixed-client transport validation |
+| `webtransport_relay_example.py` | Start a relay over HTTPS + WebTransport | Browser-friendly MOQ transport validation |
 | `publisher_example.py` | Publish objects over stream and datagram transport | Publisher reference flow |
+| `webtransport_publisher_example.py` | Publish over a WebTransport session | MOQ over WebTransport reference flow |
 | `subscriber_example.py` | Subscribe to a track and receive live objects | Subscriber reference flow |
+| `webtransport_subscriber_example.py` | Subscribe over a WebTransport session | End-to-end WebTransport receive validation |
 | `video_publisher_example.py` | Generate a live timestamped H.264 test stream and publish it as stream objects | Real-time video stream validation |
 | `video_subscriber_example.py` | Reassemble the streamed fragmented MP4 into `receive.mp4` and preview it with `ffplay` | End-to-end live video receive validation |
 | `fetch_example.py` | Fetch historical objects by range | Cache and history validation |
@@ -25,7 +29,9 @@ behavior, and a single-file quick start.
 4. Run `fetch_example.py` after some objects exist in relay cache.
 5. Run `reconnection_example.py` to validate cache-backed recovery.
 6. Run `video_subscriber_example.py` and `video_publisher_example.py` to validate large-object stream delivery.
-7. Use `basic_example.py` when you want a fast one-process demo.
+7. Run `dual_transport_relay_example.py` when you want one relay instance to serve QUIC and WebTransport clients at the same time.
+8. Run the `webtransport_*_example.py` trio to validate MOQ over WebTransport.
+9. Use `basic_example.py` when you want a fast one-process demo.
 
 ## Example Details
 
@@ -40,6 +46,30 @@ behavior, and a single-file quick start.
 - Purpose: publish a sample track and send a sequence of objects.
 - Best for: validating `PUBLISH`, object encoding, and stream/datagram delivery paths.
 - Checkpoints: publish acknowledgement, incrementing object identifiers, and clean unpublish.
+
+### `webtransport_relay_example.py`
+
+- Purpose: start the relay on an HTTPS endpoint and accept WebTransport sessions on `/moq`.
+- Best for: validating MOQT Section 3.1.1 style session establishment in this repo.
+- Checkpoints: relay starts with TLS, accepts extended CONNECT, and forwards MOQ streams/datagrams through the session.
+
+### `dual_transport_relay_example.py`
+
+- Purpose: start one relay instance with native QUIC and WebTransport multiplexed on the same UDP port.
+- Best for: validating mixed deployments where native clients and browser-facing clients share one relay state and cache.
+- Checkpoints: one port accepts both ALPNs, both transports can attach to the same relay, and published objects are visible across transports.
+
+### `webtransport_publisher_example.py`
+
+- Purpose: publish a sample track over a WebTransport session.
+- Best for: validating publisher-side control stream setup plus stream/datagram delivery over WebTransport.
+- Checkpoints: WebTransport session establishment, publish acknowledgement, and live object delivery.
+
+### `webtransport_subscriber_example.py`
+
+- Purpose: subscribe to a sample track over a WebTransport session and print incoming objects.
+- Best for: validating subscriber-side control stream/data stream separation over WebTransport.
+- Checkpoints: subscription accepted and objects continue arriving over the same session.
 
 ### `subscriber_example.py`
 
@@ -198,8 +228,12 @@ Run examples from the repository root:
 
 ```bash
 python examples/relay_example.py
+python examples/dual_transport_relay_example.py
 python examples/publisher_example.py
 python examples/subscriber_example.py
+python examples/webtransport_relay_example.py
+python examples/webtransport_publisher_example.py
+python examples/webtransport_subscriber_example.py
 python examples/video_publisher_example.py
 python examples/video_subscriber_example.py
 python examples/fetch_example.py

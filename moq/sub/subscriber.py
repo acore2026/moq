@@ -16,7 +16,7 @@ from moq.messages import (
     ObjectStatus, StreamType, ErrorCode
 )
 from moq.encoding import FullTrackName, Location, VarInt
-from moq.transport import QUICClient, StreamData, DatagramData
+from moq.transport import QUICClient, WebTransportClient, StreamData, DatagramData
 
 logger = logging.getLogger(__name__)
 
@@ -38,13 +38,23 @@ class MOQSubscriber:
     Subscribes to tracks from a relay or publisher.
     """
     
-    def __init__(self, relay_host: str, relay_port: int):
+    def __init__(
+        self,
+        relay_host: str,
+        relay_port: int,
+        transport: str = "quic",
+        webtransport_path: str = "/moq",
+    ):
         self.relay_host = relay_host
         self.relay_port = relay_port
+        self.transport = transport
+        self.webtransport_path = webtransport_path
         
         # Connection
-        self._client: Optional[QUICClient] = None
+        self._client = None
         self._session: Optional[MOQSession] = None
+        self._local_control_stream_id: Optional[int] = None
+        self._peer_control_stream_id: Optional[int] = None
         
         # Subscriptions
         self._subscriptions: Dict[FullTrackName, int] = {}  # track -> request_id
@@ -88,8 +98,8 @@ class MOQSubscriber:
         logger.info(f"Connecting to relay at {self.relay_host}:{self.relay_port}")
         
         try:
-            # Create QUIC client
-            self._client = QUICClient(self.relay_host, self.relay_port)
+            # Create transport client
+            self._client = self._create_transport_client()
             self._client.set_handlers(
                 on_stream_data=self._handle_stream_data,
                 on_datagram=self._handle_datagram,
@@ -107,6 +117,7 @@ class MOQSubscriber:
                 role=Role.SUBSCRIBER
             )
             self._session.set_send_callback(self._send_data)
+            self._local_control_stream_id = await self._client.open_stream(unidirectional=True)
             
             # Send SETUP
             await self._session.send_setup(Role.SUBSCRIBER)
@@ -132,6 +143,8 @@ class MOQSubscriber:
         if self._session:
             self._session.close()
             self._session = None
+        self._local_control_stream_id = None
+        self._peer_control_stream_id = None
         
         if self._client:
             self._client.close()
@@ -241,22 +254,32 @@ class MOQSubscriber:
         return request_id
     
     async def _send_data(self, data: bytes):
-        """Send data over QUIC control stream."""
-        if self._client:
-            # Use stream 0 for control messages
-            await self._client.send_stream_data(0, data)
-    
+        """Send data over the local control stream."""
+        if self._client and self._local_control_stream_id is not None:
+            await self._client.send_stream_data(self._local_control_stream_id, data)
+
     async def _handle_stream_data(self, protocol, data: StreamData):
         """Handle incoming stream data."""
         logger.debug(f"Received stream data: stream_id={data.stream_id}, length={len(data.data)}")
-        
-        if data.stream_id == 0:
+
+        if self._peer_control_stream_id is None:
+            self._peer_control_stream_id = data.stream_id
+            await self._handle_control_data(data.data, end_stream=data.end_stream)
+            return
+
+        if data.stream_id == self._peer_control_stream_id:
             # Control stream
             await self._handle_control_data(data.data, end_stream=data.end_stream)
-        else:
-            # Data stream - could be subgroup or fetch stream
-            await self._handle_data_stream(data.stream_id, data.data, end_stream=data.end_stream)
-    
+            return
+
+        handled_as_data = await self._handle_data_stream(
+            data.stream_id,
+            data.data,
+            end_stream=data.end_stream,
+        )
+        if handled_as_data:
+            return
+
     async def _handle_control_data(self, data: bytes, end_stream: bool = False):
         """Handle control message data."""
         self._control_buffer += data
@@ -326,7 +349,7 @@ class MOQSubscriber:
                 if track_alias is not None:
                     self._track_aliases[track_alias] = track_name
     
-    async def _handle_data_stream(self, stream_id: int, data: bytes, end_stream: bool = False):
+    async def _handle_data_stream(self, stream_id: int, data: bytes, end_stream: bool = False) -> bool:
         """Handle data from a data stream."""
         buffer = self._data_stream_buffers.setdefault(stream_id, bytearray())
         buffer.extend(data)
@@ -346,11 +369,12 @@ class MOQSubscriber:
             else:
                 logger.warning(f"Unknown stream type: {stream_type}")
                 self._cleanup_data_stream(stream_id)
+                return False
         except Exception as e:
             if end_stream:
                 logger.warning(f"Failed to handle data stream: {e}")
                 self._cleanup_data_stream(stream_id)
-            return
+            return False
 
         if end_stream:
             if buffer:
@@ -358,6 +382,8 @@ class MOQSubscriber:
                     f"Data stream {stream_id} ended with {len(buffer)} buffered bytes"
                 )
             self._cleanup_data_stream(stream_id)
+
+        return True
 
     async def _handle_subgroup_stream(self, stream_id: int, buffer: bytearray):
         """Handle subgroup stream data."""
@@ -499,6 +525,19 @@ class MOQSubscriber:
         """Handle connection close."""
         logger.info(f"Connection closed: error={error_code}, reason={reason}")
         self.disconnect()
+
+    def _create_transport_client(self):
+        """Instantiate the configured transport client."""
+        transport = self.transport.lower()
+        if transport == "quic":
+            return QUICClient(self.relay_host, self.relay_port)
+        if transport == "webtransport":
+            return WebTransportClient(
+                self.relay_host,
+                self.relay_port,
+                path=self.webtransport_path,
+            )
+        raise ValueError(f"Unsupported transport: {self.transport}")
     
     async def _process_objects(self):
         """Process received objects from queue."""

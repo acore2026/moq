@@ -1,6 +1,6 @@
 """
 MOQ Transport Layer module.
-Provides QUIC transport support.
+Provides QUIC and WebTransport transport support.
 """
 
 from .quic_transport import (
@@ -11,6 +11,14 @@ from .quic_transport import (
     DatagramData,
     is_quic_available
 )
+from .webtransport import (
+    WebTransportClient,
+    WebTransportServer,
+    WebTransportSessionConnection,
+    WebTransportError,
+    is_webtransport_available,
+)
+from .combined_transport import CombinedTransportServer
 
 __all__ = [
     'QUICClient',
@@ -19,4 +27,10 @@ __all__ = [
     'StreamData',
     'DatagramData',
     'is_quic_available',
+    'WebTransportClient',
+    'WebTransportServer',
+    'WebTransportSessionConnection',
+    'WebTransportError',
+    'is_webtransport_available',
+    'CombinedTransportServer',
 ]

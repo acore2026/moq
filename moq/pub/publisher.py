@@ -15,7 +15,7 @@ from moq.messages import (
     ObjectStatus, StreamType
 )
 from moq.encoding import FullTrackName, VarInt
-from moq.transport import QUICClient, StreamData, DatagramData
+from moq.transport import QUICClient, WebTransportClient, StreamData, DatagramData
 
 logger = logging.getLogger(__name__)
 
@@ -37,13 +37,23 @@ class MOQPublisher:
     Publishes tracks to a relay or subscriber.
     """
     
-    def __init__(self, relay_host: str, relay_port: int):
+    def __init__(
+        self,
+        relay_host: str,
+        relay_port: int,
+        transport: str = "quic",
+        webtransport_path: str = "/moq",
+    ):
         self.relay_host = relay_host
         self.relay_port = relay_port
+        self.transport = transport
+        self.webtransport_path = webtransport_path
         
         # Connection
-        self._client: Optional[QUICClient] = None
+        self._client = None
         self._session: Optional[MOQSession] = None
+        self._local_control_stream_id: Optional[int] = None
+        self._peer_control_stream_id: Optional[int] = None
         
         # Publications
         self._publications: Dict[FullTrackName, int] = {}  # track -> request_id
@@ -78,8 +88,8 @@ class MOQPublisher:
         logger.info(f"Connecting to relay at {self.relay_host}:{self.relay_port}")
         
         try:
-            # Create QUIC client
-            self._client = QUICClient(self.relay_host, self.relay_port)
+            # Create transport client
+            self._client = self._create_transport_client()
             self._client.set_handlers(
                 on_stream_data=self._handle_stream_data,
                 on_datagram=self._handle_datagram,
@@ -100,6 +110,7 @@ class MOQPublisher:
             self._session.set_handlers(
                 on_publish=self._handle_publish_response
             )
+            self._local_control_stream_id = await self._client.open_stream(unidirectional=True)
             
             # Send SETUP
             await self._session.send_setup(Role.PUBLISHER)
@@ -122,6 +133,8 @@ class MOQPublisher:
         if self._session:
             self._session.close()
             self._session = None
+        self._local_control_stream_id = None
+        self._peer_control_stream_id = None
         
         if self._client:
             self._client.close()
@@ -289,17 +302,18 @@ class MOQPublisher:
             logger.debug(f"Closed subgroup stream: track={track_alias}, group={group_id}, subgroup={subgroup_id}")
     
     async def _send_data(self, data: bytes):
-        """Send data over QUIC control stream."""
-        if self._client:
-            # Use stream 0 for control messages
-            await self._client.send_stream_data(0, data)
+        """Send data over the local control stream."""
+        if self._client and self._local_control_stream_id is not None:
+            await self._client.send_stream_data(self._local_control_stream_id, data)
     
     async def _handle_stream_data(self, protocol, data: StreamData):
         """Handle incoming stream data."""
         logger.debug(f"Received stream data: stream_id={data.stream_id}, length={len(data.data)}")
         
-        # Parse and handle control messages
-        if self._session and data.stream_id == 0:
+        if self._peer_control_stream_id is None:
+            self._peer_control_stream_id = data.stream_id
+
+        if self._session and data.stream_id == self._peer_control_stream_id:
             await self._handle_control_data(data.data, end_stream=data.end_stream)
 
     async def _handle_control_data(self, data: bytes, end_stream: bool = False):
@@ -338,6 +352,19 @@ class MOQPublisher:
         """Handle connection close."""
         logger.info(f"Connection closed: error={error_code}, reason={reason}")
         self.disconnect()
+
+    def _create_transport_client(self):
+        """Instantiate the configured transport client."""
+        transport = self.transport.lower()
+        if transport == "quic":
+            return QUICClient(self.relay_host, self.relay_port)
+        if transport == "webtransport":
+            return WebTransportClient(
+                self.relay_host,
+                self.relay_port,
+                path=self.webtransport_path,
+            )
+        raise ValueError(f"Unsupported transport: {self.transport}")
     
     def _handle_publish_response(self, msg: PublishMessage):
         """Handle publish response."""

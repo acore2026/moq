@@ -8,8 +8,9 @@ import ipaddress
 import logging
 import ssl
 import tempfile
+from collections import deque
 from datetime import datetime, timedelta
-from typing import Optional, Callable, Dict, Set, Tuple, Any
+from typing import Optional, Callable, Dict, Deque, Set, Tuple, Any
 from dataclasses import dataclass
 
 logger = logging.getLogger(__name__)
@@ -56,6 +57,30 @@ class DatagramData:
     data: bytes
 
 
+class _OrderedCallbackDispatcher:
+    """Run async callbacks serially in enqueue order."""
+
+    def __init__(self, logger: logging.Logger):
+        self._logger = logger
+        self._queue: Deque[tuple[Callable, tuple[Any, ...]]] = deque()
+        self._drain_task: Optional[asyncio.Task] = None
+
+    def enqueue(self, callback: Optional[Callable], *args: Any) -> None:
+        if callback is None:
+            return
+        self._queue.append((callback, args))
+        if self._drain_task is None or self._drain_task.done():
+            self._drain_task = asyncio.create_task(self._drain())
+
+    async def _drain(self) -> None:
+        while self._queue:
+            callback, args = self._queue.popleft()
+            try:
+                await callback(*args)
+            except Exception:
+                self._logger.exception("Ordered callback failed")
+
+
 class MOQQuicProtocol(QuicConnectionProtocol):
     """QUIC protocol handler for MOQ Transport."""
     
@@ -70,13 +95,13 @@ class MOQQuicProtocol(QuicConnectionProtocol):
         self._on_connection_open = on_connection_open
         self._on_connection_close = on_connection_close
         self._stream_buffers: Dict[int, bytes] = {}
+        self._dispatcher = _OrderedCallbackDispatcher(logger)
         logger.info("MOQQuicProtocol initialized")
 
     def connection_made(self, transport):
         """Handle new QUIC connection."""
         super().connection_made(transport)
-        if self._on_connection_open:
-            asyncio.create_task(self._on_connection_open(self))
+        self._dispatcher.enqueue(self._on_connection_open, self)
     
     def quic_event_received(self, event: QuicEvent) -> None:
         """Handle QUIC events."""
@@ -89,13 +114,12 @@ class MOQQuicProtocol(QuicConnectionProtocol):
             self._stream_buffers[event.stream_id] += event.data
             
             # Notify handler
-            if self._on_stream_data:
-                data = StreamData(
-                    stream_id=event.stream_id,
-                    data=event.data,
-                    end_stream=event.end_stream
-                )
-                asyncio.create_task(self._on_stream_data(self, data))
+            data = StreamData(
+                stream_id=event.stream_id,
+                data=event.data,
+                end_stream=event.end_stream
+            )
+            self._dispatcher.enqueue(self._on_stream_data, self, data)
             
             # Clean up if stream ended
             if event.end_stream and event.stream_id in self._stream_buffers:
@@ -108,14 +132,17 @@ class MOQQuicProtocol(QuicConnectionProtocol):
         
         elif isinstance(event, DatagramFrameReceived):
             logger.debug(f"Datagram received: length={len(event.data)}")
-            if self._on_datagram:
-                data = DatagramData(data=event.data)
-                asyncio.create_task(self._on_datagram(self, data))
+            data = DatagramData(data=event.data)
+            self._dispatcher.enqueue(self._on_datagram, self, data)
         
         elif isinstance(event, ConnectionTerminated):
             logger.info(f"Connection terminated: error_code={event.error_code}, reason={event.reason_phrase}")
-            if self._on_connection_close:
-                asyncio.create_task(self._on_connection_close(self, event.error_code, event.reason_phrase))
+            self._dispatcher.enqueue(
+                self._on_connection_close,
+                self,
+                event.error_code,
+                event.reason_phrase,
+            )
 
 
 class QUICClient:

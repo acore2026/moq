@@ -191,7 +191,7 @@ pip install -r requirements.txt
 
 ```bash
 # 终端 1: 启动 Relay
-cd /home/acn/cxr/moq-py
+cd /home/acn/cxr/moq-py-stream
 python examples/relay_example.py
 
 # 终端 2: 启动 Publisher
@@ -206,6 +206,30 @@ python examples/subscriber_example.py
 ```bash
 python examples/fetch_example.py
 ```
+
+如果想验证 `draft-ietf-moq-transport-17` 里 3.1.1 所述的 WebTransport 会话建立和后续 MOQ stream/datagram 传输，可以运行：
+
+```bash
+# 终端 1: 启动 WebTransport Relay
+python examples/webtransport_relay_example.py
+
+# 终端 2: 启动 WebTransport Publisher
+python examples/webtransport_publisher_example.py
+
+# 终端 3: 启动 WebTransport Subscriber
+python examples/webtransport_subscriber_example.py
+```
+
+如果想让一个 relay 实例同时服务原生 QUIC 客户端和 WebTransport 客户端，可以运行：
+
+```bash
+python examples/dual_transport_relay_example.py
+```
+
+其中默认监听为：
+
+- QUIC: `127.0.0.1:4443`
+- WebTransport: `https://127.0.0.1:4443/moq`
 
 如果想观察断线恢复和缓存行为，可以运行：
 
@@ -279,6 +303,8 @@ from moq.encoding import FullTrackName
 
 # 创建 Publisher
 publisher = MOQPublisher("relay.example.com", 4433)
+# 或通过 WebTransport 连接
+# publisher = MOQPublisher("relay.example.com", 4433, transport="webtransport", webtransport_path="/moq")
 
 # 设置回调
 def on_connected():
@@ -322,6 +348,8 @@ from moq.encoding import FullTrackName
 
 # 创建 Subscriber
 subscriber = MOQSubscriber("relay.example.com", 4433)
+# 或通过 WebTransport 连接
+# subscriber = MOQSubscriber("relay.example.com", 4433, transport="webtransport", webtransport_path="/moq")
 
 # 设置回调
 def on_object_received(obj: ReceivedObject):
@@ -375,6 +403,12 @@ relay = MOQRelay(
     max_memory_cache=100 * 1024 * 1024,  # 100MB
     max_disk_cache=1024 * 1024 * 1024     # 1GB
 )
+# 或通过 WebTransport 提供 HTTPS + CONNECT /moq
+# relay = MOQRelay(host="0.0.0.0", port=4433, transport="webtransport", webtransport_path="/moq")
+# 或在同一端口同时启用原生 QUIC + WebTransport
+# relay = MOQRelay(host="0.0.0.0", port=4443, transport="both", webtransport_path="/moq")
+# 如需分离端口，也可以显式指定 webtransport_port
+# relay = MOQRelay(host="0.0.0.0", port=4443, transport="both", webtransport_port=4433, webtransport_path="/moq")
 
 # 启动
 await relay.start()
@@ -490,7 +524,7 @@ MOQ_LOG_LEVEL=DEBUG python example.py
 - [x] Publisher/Subscriber 实现
 - [x] Relay 与缓存
 - [x] 基础示例
-- [ ] WebTransport 支持
+- [x] WebTransport 支持
 - [ ] 更完整的错误处理
 - [ ] 性能测试与优化
 - [ ] TLS 证书管理

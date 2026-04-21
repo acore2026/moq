@@ -4,11 +4,15 @@ from pathlib import Path
 
 EXAMPLES = [
     "basic_example.py",
+    "dual_transport_relay_example.py",
     "fetch_example.py",
     "publisher_example.py",
     "reconnection_example.py",
     "relay_example.py",
     "subscriber_example.py",
+    "webtransport_relay_example.py",
+    "webtransport_publisher_example.py",
+    "webtransport_subscriber_example.py",
 ]
 
 

@@ -501,6 +501,80 @@ async def test_relay_start_clears_disk_cache():
 
 
 @pytest.mark.asyncio
+async def test_relay_can_start_quic_and_webtransport_together():
+    """Test relay can start both listeners in one instance."""
+    logger.info("Testing dual-transport relay startup...")
+
+    from moq.relay import MOQRelay
+
+    class DummyServer:
+        def __init__(self, name):
+            self.name = name
+            self.handlers = None
+            self.started = 0
+            self.stopped = 0
+
+        def set_handlers(self, **kwargs):
+            self.handlers = kwargs
+
+        async def start(self):
+            self.started += 1
+
+        async def stop(self):
+            self.stopped += 1
+
+    relay = MOQRelay(
+        host="127.0.0.1",
+        port=4443,
+        webtransport_port=4433,
+        cache_dir=None,
+        max_memory_cache=1024,
+        max_disk_cache=1024,
+        transport="both",
+    )
+    relay._quic_server = DummyServer("quic")
+    relay._webtransport_server = DummyServer("webtransport")
+
+    await relay.start()
+
+    assert relay._quic_server.started == 1
+    assert relay._webtransport_server.started == 1
+    assert relay._quic_server.handlers is not None
+    assert relay._webtransport_server.handlers is not None
+
+    await relay.stop()
+
+    assert relay._quic_server.stopped == 1
+    assert relay._webtransport_server.stopped == 1
+
+    logger.info("Dual-transport relay startup test passed!\n")
+
+
+def test_relay_uses_combined_server_for_single_port_dual_transport():
+    """Test relay chooses the combined server when both transports share one port."""
+    logger.info("Testing single-port dual-transport relay selection...")
+
+    from moq.relay import MOQRelay
+    from moq.transport import CombinedTransportServer
+
+    relay = MOQRelay(
+        host="127.0.0.1",
+        port=4443,
+        cache_dir=None,
+        max_memory_cache=1024,
+        max_disk_cache=1024,
+        transport="both",
+    )
+
+    assert isinstance(relay._combined_server, CombinedTransportServer)
+    assert relay._quic_server is relay._combined_server
+    assert relay._webtransport_server is relay._combined_server
+    assert relay.webtransport_port == 4443
+
+    logger.info("Single-port dual-transport relay selection test passed!\n")
+
+
+@pytest.mark.asyncio
 async def test_relay_registers_client_lazily_for_first_publish():
     """Test relay accepts the first publish even if connect callback is delayed."""
     logger.info("Testing lazy relay client registration...")
@@ -576,6 +650,8 @@ async def run_all_tests():
     await test_session_management()
     await test_cache()
     await test_relay_start_clears_disk_cache()
+    await test_relay_can_start_quic_and_webtransport_together()
+    test_relay_uses_combined_server_for_single_port_dual_transport()
     await test_relay_registers_client_lazily_for_first_publish()
     
     logger.info("=" * 60)
