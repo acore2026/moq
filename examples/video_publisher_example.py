@@ -18,6 +18,7 @@ import asyncio
 import json
 import logging
 from datetime import datetime, timezone
+from typing import Optional
 
 try:
     from examples._bootstrap import ensure_repo_root, setup_logging
@@ -43,15 +44,25 @@ CHUNK_SIZE = 512 * 1024
 VIDEO_BITRATE = "2M"
 SUBSCRIBER_GRACE_PERIOD = 1.0
 DRAIN_GRACE_PERIOD = 60.0
+FFMPEG_STARTUP_GRACE_PERIOD = 0.25
 
 
-def build_ffmpeg_command() -> list[str]:
-    """Build the ffmpeg command for a live timestamped test stream."""
-    video_filter = (
-        f"testsrc2=size={FRAME_WIDTH}x{FRAME_HEIGHT}:rate={FRAME_RATE},"
-        "drawtext=text=%{localtime\\:%Y-%m-%d %H\\\\:%M\\\\:%S}:"
+def build_video_filter(include_timestamp: bool = True) -> str:
+    """Build the ffmpeg lavfi graph for the live test stream."""
+    video_filter = f"testsrc2=size={FRAME_WIDTH}x{FRAME_HEIGHT}:rate={FRAME_RATE}"
+    if not include_timestamp:
+        return video_filter
+
+    return (
+        f"{video_filter},"
+        "drawtext=expansion=strftime:text=%Y-%m-%d %H\\:%M\\:%S:"
         "x=20:y=20:fontsize=36:fontcolor=white:box=1:boxcolor=0x00000099"
     )
+
+
+def build_ffmpeg_command(include_timestamp: bool = True) -> list[str]:
+    """Build the ffmpeg command for a live timestamped test stream."""
+    video_filter = build_video_filter(include_timestamp=include_timestamp)
 
     return [
         "ffmpeg",
@@ -90,6 +101,49 @@ def build_ffmpeg_command() -> list[str]:
         "mp4",
         "pipe:1",
     ]
+
+
+async def launch_ffmpeg_live_source() -> Optional[asyncio.subprocess.Process]:
+    """Launch ffmpeg and fall back to a plain test source if drawtext is unavailable."""
+    for include_timestamp in (True, False):
+        ffmpeg_command = build_ffmpeg_command(include_timestamp=include_timestamp)
+        logger.info(
+            "Launching ffmpeg live test source%s",
+            " with timestamp overlay" if include_timestamp else " without timestamp overlay",
+        )
+        try:
+            ffmpeg_process = await asyncio.create_subprocess_exec(
+                *ffmpeg_command,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+        except FileNotFoundError:
+            logger.error("ffmpeg executable not found in PATH")
+            return None
+
+        await asyncio.sleep(FFMPEG_STARTUP_GRACE_PERIOD)
+        if ffmpeg_process.returncode is None:
+            if not include_timestamp:
+                logger.warning("Continuing without ffmpeg timestamp overlay")
+            return ffmpeg_process
+
+        stderr = b""
+        if ffmpeg_process.stderr is not None:
+            stderr = await ffmpeg_process.stderr.read()
+        stderr_text = stderr.decode("utf-8", errors="replace")
+
+        if include_timestamp:
+            logger.warning(
+                "ffmpeg timestamp overlay startup failed with code %d; retrying without drawtext: %s",
+                ffmpeg_process.returncode,
+                stderr_text,
+            )
+            continue
+
+        logger.error("ffmpeg exited during startup with code %d: %s", ffmpeg_process.returncode, stderr_text)
+        return None
+
+    return None
 
 
 async def main():
@@ -175,13 +229,9 @@ async def main():
         )
         logger.info("Sent metadata object: group=%d object=%d", GROUP_ID, 1)
 
-        ffmpeg_command = build_ffmpeg_command()
-        logger.info("Launching ffmpeg live test source")
-        ffmpeg_process = await asyncio.create_subprocess_exec(
-            *ffmpeg_command,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
+        ffmpeg_process = await launch_ffmpeg_live_source()
+        if ffmpeg_process is None:
+            return
         logger.info("Live stream is running continuously; press Ctrl+C to stop publisher")
 
         while True:
