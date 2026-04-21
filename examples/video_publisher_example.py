@@ -17,6 +17,7 @@ Recommended order:
 import asyncio
 import json
 import logging
+import struct
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -45,6 +46,97 @@ VIDEO_BITRATE = "2M"
 SUBSCRIBER_GRACE_PERIOD = 1.0
 DRAIN_GRACE_PERIOD = 60.0
 FFMPEG_STARTUP_GRACE_PERIOD = 0.25
+DEFAULT_MSE_CODEC = "avc1.64001F"
+DEFAULT_MIME_TYPE = f'video/mp4; codecs="{DEFAULT_MSE_CODEC}"'
+
+
+def _decode_mp4_box_length(buffer: bytearray, offset: int = 0) -> tuple[int, bytes, int] | None:
+    """Return the byte length and type for one complete top-level MP4 box header."""
+    if len(buffer) - offset < 8:
+        return None
+
+    size = struct.unpack_from(">I", buffer, offset)[0]
+    box_type = bytes(buffer[offset + 4:offset + 8])
+    header_length = 8
+
+    if size == 1:
+        if len(buffer) - offset < 16:
+            return None
+        size = struct.unpack_from(">Q", buffer, offset + 8)[0]
+        header_length = 16
+    elif size == 0:
+        return None
+
+    if size < header_length:
+        raise ValueError(f"Invalid MP4 box size {size} for box {box_type!r}")
+
+    return size, box_type, header_length
+
+
+class FragmentedMp4Muxer:
+    """Convert a raw fMP4 byte stream into init-segment and media-fragment units."""
+
+    def __init__(self):
+        self._buffer = bytearray()
+        self._init_parts: list[bytes] = []
+        self._current_fragment_parts: list[bytes] = []
+        self._saw_first_fragment = False
+
+    def feed(self, data: bytes) -> list[tuple[str, bytes]]:
+        """Return complete init/media units extracted from the incoming byte stream."""
+        self._buffer.extend(data)
+        emitted: list[tuple[str, bytes]] = []
+
+        while True:
+            decoded = _decode_mp4_box_length(self._buffer)
+            if decoded is None:
+                break
+
+            box_length, box_type, _ = decoded
+            if len(self._buffer) < box_length:
+                break
+
+            box = bytes(self._buffer[:box_length])
+            del self._buffer[:box_length]
+
+            if not self._saw_first_fragment:
+                if box_type == b"moof":
+                    self._saw_first_fragment = True
+                    init_segment = b"".join(self._init_parts)
+                    self._init_parts.clear()
+                    if init_segment:
+                        emitted.append(("init", init_segment))
+                    self._current_fragment_parts = [box]
+                else:
+                    self._init_parts.append(box)
+                continue
+
+            if box_type == b"moof":
+                if self._current_fragment_parts:
+                    emitted.append(("fragment", b"".join(self._current_fragment_parts)))
+                self._current_fragment_parts = [box]
+                continue
+
+            self._current_fragment_parts.append(box)
+
+        return emitted
+
+    def flush(self) -> list[tuple[str, bytes]]:
+        """Emit any final complete units after the source stream ends."""
+        emitted: list[tuple[str, bytes]] = []
+
+        if not self._saw_first_fragment and self._init_parts:
+            emitted.append(("init", b"".join(self._init_parts)))
+            self._init_parts.clear()
+
+        if self._current_fragment_parts:
+            emitted.append(("fragment", b"".join(self._current_fragment_parts)))
+            self._current_fragment_parts = []
+
+        if self._buffer:
+            raise ValueError(f"Trailing {len(self._buffer)} bytes remain after MP4 muxer flush")
+
+        return emitted
 
 
 def build_video_filter(include_timestamp: bool = True) -> str:
@@ -168,6 +260,7 @@ async def main():
     object_id = 2
     sent_bytes = 0
     closed_subgroup = False
+    muxer = FragmentedMp4Muxer()
 
     async def close_live_subgroup():
         nonlocal closed_subgroup
@@ -211,6 +304,8 @@ async def main():
             "type": "live-test-stream",
             "codec": "H.264",
             "container": "fMP4",
+            "mime_type": DEFAULT_MIME_TYPE,
+            "mse_codec": DEFAULT_MSE_CODEC,
             "width": FRAME_WIDTH,
             "height": FRAME_HEIGHT,
             "fps": FRAME_RATE,
@@ -234,10 +329,8 @@ async def main():
             return
         logger.info("Live stream is running continuously; press Ctrl+C to stop publisher")
 
-        while True:
-            chunk = await ffmpeg_process.stdout.read(CHUNK_SIZE)
-            if not chunk:
-                break
+        async def publish_media_unit(unit_type: str, payload: bytes):
+            nonlocal object_id, sent_bytes
 
             await publisher.send_object(
                 TRACK_NAME,
@@ -245,18 +338,27 @@ async def main():
                     group_id=GROUP_ID,
                     object_id=object_id,
                     subgroup_id=SUBGROUP_ID,
-                    payload=chunk,
+                    payload=payload,
                 ),
             )
-            sent_bytes += len(chunk)
+            sent_bytes += len(payload)
             logger.info(
-                "Sent live chunk as group=%d object=%d (%d bytes, total=%d)",
+                "Sent %s as group=%d object=%d (%d bytes, total=%d)",
+                unit_type,
                 GROUP_ID,
                 object_id,
-                len(chunk),
+                len(payload),
                 sent_bytes,
             )
             object_id += 1
+
+        while True:
+            chunk = await ffmpeg_process.stdout.read(CHUNK_SIZE)
+            if not chunk:
+                break
+
+            for unit_type, payload in muxer.feed(chunk):
+                await publish_media_unit(unit_type, payload)
 
         stderr = b""
         if ffmpeg_process.stderr is not None:
@@ -266,6 +368,9 @@ async def main():
         if return_code != 0:
             logger.error("ffmpeg exited with code %d: %s", return_code, stderr.decode("utf-8", errors="replace"))
             return
+
+        for unit_type, payload in muxer.flush():
+            await publish_media_unit(unit_type, payload)
 
         logger.info(
             "Live stream generation complete: %d objects, %d bytes of media payload",

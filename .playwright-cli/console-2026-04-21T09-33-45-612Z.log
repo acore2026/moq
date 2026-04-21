@@ -1,0 +1,3 @@
+[      44ms] [ERROR] Failed to establish a connection to https://127.0.0.1:4433/wt: net::ERR_QUIC_PROTOCOL_ERROR.QUIC_TLS_CERTIFICATE_UNKNOWN (TLS handshake failure (ENCRYPTION_HANDSHAKE) 46: certificate unknown. SSLErrorStack:[handshake.cc:298] error:1000007d:SSL routines:OPENSSL_internal:CERTIFICATE_VERIFY_FAILED). @ :0
+[      67ms] [ERROR] Failed to load resource: the server responded with a status of 404 (Not Found) @ http://localhost:33551/favicon.ico:0
+[      76ms] [ERROR] Failed to establish a connection to https://localhost:4433/wt: net::ERR_CONNECTION_REFUSED. @ :0

@@ -39,7 +39,7 @@ from aioquic.quic.configuration import QuicConfiguration
 from aioquic.quic.events import ConnectionTerminated, ProtocolNegotiated, QuicEvent
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
-from cryptography.hazmat.primitives.asymmetric import rsa
+from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.x509.oid import NameOID
 
 from moq import MOQSubscriber, FullTrackName, ObjectStatus, ReceivedObject
@@ -56,7 +56,17 @@ WEBTRANSPORT_HOST = "127.0.0.1"
 WEBTRANSPORT_PORT = 4433
 WEBTRANSPORT_PATH = "/wt"
 MAX_REPLAY_FRAGMENTS = 8
-DEFAULT_MIME_TYPE = 'video/mp4; codecs="avc1.42E01F"'
+DEFAULT_MSE_CODEC = "avc1.64001F"
+DEFAULT_MIME_TYPE = f'video/mp4; codecs="{DEFAULT_MSE_CODEC}"'
+WEBTRANSPORT_CERT_VALIDITY_DAYS = 7
+
+# Chrome-family browsers now expect the current WebTransport-over-HTTP/3
+# SETTINGS identifier during session establishment. aioquic still advertises
+# the older ENABLE_WEBTRANSPORT draft setting, so we send both for compatibility.
+SETTINGS_WT_MAX_SESSIONS = 0x14E9CD29
+# Page refresh can overlap the old and new browser sessions briefly, so
+# advertising only one session causes intermittent handshake failures.
+WT_MAX_SESSIONS = 8
 
 FRAME_TYPE_JSON = 0x01
 FRAME_TYPE_INIT = 0x02
@@ -432,6 +442,7 @@ HTML_TEMPLATE = """<!doctype html>
       const FRAME_INIT = 2;
       const FRAME_FRAGMENT = 3;
       const FRAME_END = 4;
+      const WT_HOST = "__WT_HOST__";
       const WT_PORT = __WT_PORT__;
       const WT_PATH = "__WT_PATH__";
       const CERT_HASH_HEX = "__CERT_HASH__";
@@ -456,8 +467,11 @@ HTML_TEMPLATE = """<!doctype html>
         bytes: 0,
         codec: null,
         fragments: 0,
+        initSegment: null,
         mediaSource: null,
         metadata: null,
+        pendingSegments: [],
+        shuttingDown: false,
         sourceBuffer: null,
         transport: null,
       };
@@ -465,6 +479,41 @@ HTML_TEMPLATE = """<!doctype html>
       function hexToUint8Array(hex) {
         const pairs = hex.match(/.{1,2}/g) || [];
         return Uint8Array.from(pairs.map((pair) => parseInt(pair, 16)));
+      }
+
+      function inferAvc1CodecFromInitSegment(bytes) {
+        for (let index = 0; index <= bytes.length - 8; index += 1) {
+          if (
+            bytes[index] === 0x61 &&
+            bytes[index + 1] === 0x76 &&
+            bytes[index + 2] === 0x63 &&
+            bytes[index + 3] === 0x43
+          ) {
+            const profile = bytes[index + 5];
+            const compatibility = bytes[index + 6];
+            const level = bytes[index + 7];
+            return `avc1.${profile.toString(16).padStart(2, "0").toUpperCase()}${compatibility
+              .toString(16)
+              .padStart(2, "0")
+              .toUpperCase()}${level.toString(16).padStart(2, "0").toUpperCase()}`;
+          }
+        }
+        return "avc1.64001F";
+      }
+
+      function buildFallbackMetadataFromInitSegment(initSegment) {
+        const mseCodec = inferAvc1CodecFromInitSegment(initSegment);
+        return {
+          codec: "H.264",
+          generated_at: "inferred from init segment",
+          mime_type: `video/mp4; codecs="${mseCodec}"`,
+          mse_codec: mseCodec,
+        };
+      }
+
+      function candidateWebTransportHosts() {
+        const candidates = [WT_HOST, window.location.hostname, "127.0.0.1", "localhost"];
+        return [...new Set(candidates.filter(Boolean))];
       }
 
       function setConnectionState(label, color) {
@@ -504,6 +553,44 @@ HTML_TEMPLATE = """<!doctype html>
         elements.detailLine.textContent = reason;
       }
 
+      function applyMetadata(metadata, options = {}) {
+        const { resetPlayerIfChanged = true, flushPending = true } = options;
+        const previousMetadata = state.metadata;
+        const mergedMetadata = previousMetadata ? { ...previousMetadata, ...metadata } : metadata;
+        const mimeChanged =
+          Boolean(previousMetadata?.mime_type) &&
+          Boolean(mergedMetadata?.mime_type) &&
+          previousMetadata.mime_type !== mergedMetadata.mime_type;
+
+        state.metadata = mergedMetadata;
+        state.codec = mergedMetadata?.mse_codec || mergedMetadata?.codec || null;
+        updateStats();
+
+        if (mimeChanged && resetPlayerIfChanged) {
+          resetPlayer("Metadata changed. Rebuilding player state.");
+          if (state.initSegment) {
+            enqueueSegment(state.initSegment);
+          }
+        }
+
+        if (flushPending) {
+          flushPendingSegments();
+        }
+        return { hadMetadata: Boolean(previousMetadata), mimeChanged };
+      }
+
+      function flushPendingSegments() {
+        if (!state.metadata || state.pendingSegments.length === 0) {
+          return;
+        }
+
+        const pendingSegments = state.pendingSegments;
+        state.pendingSegments = [];
+        for (const segment of pendingSegments) {
+          enqueueSegment(segment);
+        }
+      }
+
       function flushSourceBuffer() {
         if (!state.sourceBuffer || state.sourceBuffer.updating || state.appendQueue.length === 0) {
           return;
@@ -513,7 +600,7 @@ HTML_TEMPLATE = """<!doctype html>
       }
 
       function ensurePlayer(metadata) {
-        if (state.mediaSource && state.sourceBuffer) {
+        if (state.mediaSource) {
           return;
         }
 
@@ -538,7 +625,8 @@ HTML_TEMPLATE = """<!doctype html>
 
       function enqueueSegment(bytes) {
         if (!state.metadata) {
-          logLine("segment received before metadata; ignored");
+          state.pendingSegments.push(bytes);
+          logLine("segment received before metadata; queued");
           return;
         }
         ensurePlayer(state.metadata);
@@ -548,11 +636,15 @@ HTML_TEMPLATE = """<!doctype html>
 
       function handleControlMessage(message) {
         if (message.type === "metadata") {
-          state.metadata = message.metadata;
-          state.codec = state.metadata.mse_codec || state.metadata.codec || null;
-          resetPlayer("Metadata updated. Waiting for init segment.");
-          updateStats();
-          elements.statusLine.textContent = "Metadata received from MOQ subscriber bridge.";
+          const { hadMetadata, mimeChanged } = applyMetadata(message.metadata);
+          if (!hadMetadata) {
+            resetPlayer("Metadata received. Waiting for init segment.");
+          } else if (mimeChanged) {
+            elements.statusLine.textContent = "Metadata changed; player state was rebuilt.";
+          } else {
+            elements.statusLine.textContent = "Metadata received from MOQ subscriber bridge.";
+            elements.detailLine.textContent = "Playback continues with the current initialization segment.";
+          }
           logLine(`metadata received (${state.metadata.mime_type || "unknown mime"})`);
           return;
         }
@@ -596,11 +688,22 @@ HTML_TEMPLATE = """<!doctype html>
           }
 
           if (frameType === FRAME_INIT) {
+            state.initSegment = payload;
+            if (!state.metadata) {
+              applyMetadata(buildFallbackMetadataFromInitSegment(payload), {
+                resetPlayerIfChanged: false,
+                flushPending: false,
+              });
+              elements.statusLine.textContent = "Initialization segment received before metadata.";
+              elements.detailLine.textContent = "Using codec inferred from the init segment until metadata arrives.";
+              logLine(`metadata inferred from init segment (${state.metadata.mime_type || "unknown mime"})`);
+            }
             state.bytes += payload.byteLength;
             updateStats();
             elements.statusLine.textContent = "Initialization segment appended.";
             elements.detailLine.textContent = "Live fragments will continue on the same WebTransport session.";
             enqueueSegment(payload);
+            flushPendingSegments();
             logLine(`init segment (${payload.byteLength} bytes)`);
             return;
           }
@@ -654,6 +757,78 @@ HTML_TEMPLATE = """<!doctype html>
         }
       }
 
+      function attachTransportClosedHandlers(transport, url) {
+        transport.closed
+          .then(() => {
+            if (state.transport === transport) {
+              state.transport = null;
+            }
+            setConnectionState("closed", "#5d524c");
+            logLine(`transport closed (${url})`);
+          })
+          .catch((error) => {
+            if (state.transport === transport) {
+              state.transport = null;
+            }
+            setConnectionState("error", "#8e1f0d");
+            elements.statusLine.textContent = "WebTransport closed with an error.";
+            elements.detailLine.textContent = error.message;
+            logLine(`transport closed with error (${url}): ${error.message}`);
+          });
+      }
+
+      function closeActiveTransport(reason = "page shutdown") {
+        const transport = state.transport;
+        if (!transport) {
+          return;
+        }
+        state.transport = null;
+        try {
+          transport.close();
+          console.debug(`transport close requested (${reason})`);
+        } catch (error) {
+          console.debug(`transport close skipped (${reason})`, error);
+        }
+      }
+
+      async function connectTransport() {
+        const certificateHashes = [
+          {
+            algorithm: "sha-256",
+            value: hexToUint8Array(CERT_HASH_HEX),
+          },
+        ];
+
+        const failures = [];
+        for (const host of candidateWebTransportHosts()) {
+          const url = `https://${host}:${WT_PORT}${WT_PATH}`;
+          const transport = new WebTransport(url, {
+            serverCertificateHashes: certificateHashes,
+          });
+
+          state.transport = transport;
+          setConnectionState("negotiating", "#b34622");
+          logLine(`connecting to ${url}`);
+
+          try {
+            await transport.ready;
+            attachTransportClosedHandlers(transport, url);
+            logLine(`transport ready via ${url}`);
+            return transport;
+          } catch (error) {
+            failures.push(`${url}: ${error.message}`);
+            logLine(`connect failed for ${url}: ${error.message}`);
+            try {
+              transport.close();
+            } catch (closeError) {
+              console.debug("transport close skipped", closeError);
+            }
+          }
+        }
+
+        throw new Error(`All WebTransport connection attempts failed. ${failures.join(" | ")}`);
+      }
+
       async function main() {
         if (!("WebTransport" in window)) {
           setConnectionState("unsupported", "#8e1f0d");
@@ -662,42 +837,27 @@ HTML_TEMPLATE = """<!doctype html>
           return;
         }
 
-        const hostname = window.location.hostname || "127.0.0.1";
-        const url = `https://${hostname}:${WT_PORT}${WT_PATH}`;
-        const transport = new WebTransport(url, {
-          serverCertificateHashes: [
-            {
-              algorithm: "sha-256",
-              value: hexToUint8Array(CERT_HASH_HEX),
-            },
-          ],
-        });
-
-        state.transport = transport;
-        setConnectionState("negotiating", "#b34622");
-        logLine(`connecting to ${url}`);
-
-        transport.closed
-          .then(() => {
-            setConnectionState("closed", "#5d524c");
-            logLine("transport closed");
-          })
-          .catch((error) => {
-            setConnectionState("error", "#8e1f0d");
-            elements.statusLine.textContent = "WebTransport closed with an error.";
-            elements.detailLine.textContent = error.message;
-            logLine(`transport closed with error: ${error.message}`);
-          });
-
-        await transport.ready;
+        const transport = await connectTransport();
         setConnectionState("live", "#1f7a4b");
         elements.statusLine.textContent = "WebTransport session is ready.";
         elements.detailLine.textContent = "Waiting for subscriber metadata and init segment.";
-        logLine("transport ready");
         await consumeIncomingStreams(transport);
       }
 
+      window.addEventListener("pagehide", () => {
+        state.shuttingDown = true;
+        closeActiveTransport("pagehide");
+      });
+
+      window.addEventListener("beforeunload", () => {
+        state.shuttingDown = true;
+        closeActiveTransport("beforeunload");
+      });
+
       main().catch((error) => {
+        if (state.shuttingDown) {
+          return;
+        }
         setConnectionState("failed", "#8e1f0d");
         elements.statusLine.textContent = "Failed to initialize the browser player.";
         elements.detailLine.textContent = error.message;
@@ -714,10 +874,41 @@ def pack_frame(frame_type: int, payload: bytes = b"") -> bytes:
     return bytes([frame_type]) + len(payload).to_bytes(4, "big") + payload
 
 
-def build_player_page(cert_hash_hex: str, webtransport_port: int = WEBTRANSPORT_PORT) -> bytes:
+def infer_avc1_codec_from_init_segment(init_segment: bytes) -> str | None:
+    """Infer an MSE avc1 codec string from the MP4 avcC box inside the init segment."""
+    avcc_offset = init_segment.find(b"avcC")
+    if avcc_offset < 4 or avcc_offset + 8 > len(init_segment):
+        return None
+
+    profile = init_segment[avcc_offset + 5]
+    compatibility = init_segment[avcc_offset + 6]
+    level = init_segment[avcc_offset + 7]
+    return f"avc1.{profile:02X}{compatibility:02X}{level:02X}"
+
+
+def build_browser_metadata(metadata: dict, init_segment: bytes | None = None) -> dict:
+    """Normalize stream metadata for browser playback."""
+    browser_metadata = dict(metadata)
+
+    inferred_codec = infer_avc1_codec_from_init_segment(init_segment) if init_segment is not None else None
+    mse_codec = browser_metadata.get("mse_codec") or inferred_codec or DEFAULT_MSE_CODEC
+
+    if browser_metadata.get("mse_codec") != mse_codec:
+        browser_metadata["mse_codec"] = mse_codec
+
+    browser_metadata["mime_type"] = browser_metadata.get("mime_type") or f'video/mp4; codecs="{mse_codec}"'
+    return browser_metadata
+
+
+def build_player_page(
+    cert_hash_hex: str,
+    webtransport_host: str = WEBTRANSPORT_HOST,
+    webtransport_port: int = WEBTRANSPORT_PORT,
+) -> bytes:
     """Render the browser player HTML with runtime transport settings."""
     html = (
         HTML_TEMPLATE
+        .replace("__WT_HOST__", webtransport_host)
         .replace("__WT_PORT__", str(webtransport_port))
         .replace("__WT_PATH__", WEBTRANSPORT_PATH)
         .replace("__CERT_HASH__", cert_hash_hex)
@@ -731,7 +922,9 @@ def generate_webtransport_certificate(host: str) -> tuple[str, str, str, tempfil
     cert_path = f"{temp_dir.name}/cert.pem"
     key_path = f"{temp_dir.name}/key.pem"
 
-    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    # Browsers only honor WebTransport serverCertificateHashes for short-lived
+    # certificates backed by interoperable ECDSA keys.
+    key = ec.generate_private_key(ec.SECP256R1())
     subject = issuer = x509.Name([
         x509.NameAttribute(NameOID.COMMON_NAME, host),
     ])
@@ -749,7 +942,7 @@ def generate_webtransport_certificate(host: str) -> tuple[str, str, str, tempfil
         .public_key(key.public_key())
         .serial_number(x509.random_serial_number())
         .not_valid_before(datetime.utcnow() - timedelta(minutes=1))
-        .not_valid_after(datetime.utcnow() + timedelta(days=7))
+        .not_valid_after(datetime.utcnow() + timedelta(days=WEBTRANSPORT_CERT_VALIDITY_DAYS))
         .add_extension(x509.SubjectAlternativeName(san_values), critical=False)
         .sign(key, hashes.SHA256())
     )
@@ -824,8 +1017,9 @@ class BrowserBroadcastState:
 class BrowserWebTransportSession:
     """One browser-facing WebTransport session."""
 
-    def __init__(self, protocol: "BrowserBridgeProtocol", session_id: int):
+    def __init__(self, protocol: "BrowserBridgeProtocol", session_id: int, origin: str | None = None):
         self.protocol = protocol
+        self.origin = origin
         self.session_id = session_id
         self.closed = False
         self.output_stream_id = protocol.http.create_webtransport_stream(
@@ -837,12 +1031,16 @@ class BrowserWebTransportSession:
     def send_binary(self, frame_type: int, payload: bytes):
         if self.closed:
             return
-        self.protocol.http._quic.send_stream_data(
-            self.output_stream_id,
-            pack_frame(frame_type, payload),
-            end_stream=False,
-        )
-        self.protocol.transmit()
+        try:
+            self.protocol.http._quic.send_stream_data(
+                self.output_stream_id,
+                pack_frame(frame_type, payload),
+                end_stream=False,
+            )
+            self.protocol.transmit()
+        except Exception:
+            logger.debug("Failed to send browser frame on session %d", self.session_id, exc_info=True)
+            self.protocol.drop_session(self.session_id, reason="send failure")
 
     def send_json(self, payload: dict):
         self.send_binary(FRAME_TYPE_JSON, json.dumps(payload).encode("utf-8"))
@@ -875,9 +1073,17 @@ class BrowserBridgeProtocol(QuicConnectionProtocol):
 
     def quic_event_received(self, event: QuicEvent) -> None:
         if isinstance(event, ProtocolNegotiated) and event.alpn_protocol in H3_ALPN:
-            self._http = H3Connection(self._quic, enable_webtransport=True)
+            self._http = BrowserH3Connection(self._quic, enable_webtransport=True)
         elif isinstance(event, ConnectionTerminated):
-            self._close_all_sessions()
+            logger.info(
+                "Browser QUIC connection terminated (error_code=%s, reason=%s, sessions=%d)",
+                event.error_code,
+                event.reason_phrase or "no reason",
+                len(self._sessions),
+            )
+            self._close_all_sessions(
+                reason=f"quic terminated error_code={event.error_code} reason={event.reason_phrase or 'no reason'}"
+            )
 
         if self._http is None:
             return
@@ -928,10 +1134,19 @@ class BrowserBridgeProtocol(QuicConnectionProtocol):
                 (b"sec-webtransport-http3-draft", b"draft02"),
             ],
         )
-        session = BrowserWebTransportSession(protocol=self, session_id=event.stream_id)
+        session = BrowserWebTransportSession(
+            protocol=self,
+            session_id=event.stream_id,
+            origin=origin or None,
+        )
         self._sessions[event.stream_id] = session
         self._bridge.add_session(session)
-        logger.info("Accepted browser WebTransport session %d from %s", event.stream_id, origin or "unknown-origin")
+        logger.info(
+            "Accepted browser WebTransport session %d from %s (viewers=%d)",
+            event.stream_id,
+            origin or "unknown-origin",
+            len(self._bridge.sessions),
+        )
 
     def _reject_session(self, stream_id: int, status: int):
         self.http.send_headers(
@@ -941,11 +1156,32 @@ class BrowserBridgeProtocol(QuicConnectionProtocol):
         )
         self.transmit()
 
-    def _close_all_sessions(self):
-        for session in tuple(self._sessions.values()):
-            self._bridge.remove_session(session)
-            session.close()
-        self._sessions.clear()
+    def drop_session(self, session_id: int, reason: str = "unspecified"):
+        session = self._sessions.pop(session_id, None)
+        if session is None:
+            return
+        self._bridge.remove_session(session)
+        session.close()
+        logger.info(
+            "Closed browser WebTransport session %d from %s (%s, viewers=%d)",
+            session.session_id,
+            session.origin or "unknown-origin",
+            reason,
+            len(self._bridge.sessions),
+        )
+
+    def _close_all_sessions(self, reason: str = "connection shutdown"):
+        for session_id in tuple(self._sessions):
+            self.drop_session(session_id, reason=reason)
+
+
+class BrowserH3Connection(H3Connection):
+    """Advertise both legacy and current WebTransport HTTP/3 settings."""
+
+    def _get_local_settings(self) -> dict[int, int]:
+        settings = super()._get_local_settings()
+        settings[SETTINGS_WT_MAX_SESSIONS] = WT_MAX_SESSIONS
+        return settings
 
 
 class BrowserPageServer:
@@ -1042,7 +1278,13 @@ async def main():
 
     cert_path, key_path, cert_hash_hex, cert_dir = generate_webtransport_certificate(WEBTRANSPORT_HOST)
     bridge = BrowserBroadcastState()
-    page_server = BrowserPageServer(build_player_page(cert_hash_hex, webtransport_port=WEBTRANSPORT_PORT))
+    page_server = BrowserPageServer(
+        build_player_page(
+            cert_hash_hex,
+            webtransport_host=WEBTRANSPORT_HOST,
+            webtransport_port=WEBTRANSPORT_PORT,
+        )
+    )
     subscriber = MOQSubscriber(relay_host=RELAY_HOST, relay_port=RELAY_PORT)
     object_queue: asyncio.Queue[ReceivedObject] = asyncio.Queue()
     running = asyncio.Event()
@@ -1068,9 +1310,7 @@ async def main():
                 continue
 
             if obj.object_id == 1:
-                metadata = json.loads(obj.payload.decode("utf-8"))
-                metadata.setdefault("mime_type", DEFAULT_MIME_TYPE)
-                metadata.setdefault("mse_codec", "avc1.42E01F")
+                metadata = build_browser_metadata(json.loads(obj.payload.decode("utf-8")))
                 bridge.set_metadata(metadata)
                 logger.info(
                     "Received metadata: codec=%s resolution=%sx%s fps=%s mime=%s",
@@ -1083,6 +1323,11 @@ async def main():
                 continue
 
             if bridge.init_segment is None:
+                if bridge.metadata is not None:
+                    metadata = build_browser_metadata(bridge.metadata, init_segment=obj.payload)
+                    if metadata != bridge.metadata:
+                        bridge.set_metadata(metadata)
+                        logger.info("Updated browser codec from init segment: mse_codec=%s", metadata.get("mse_codec"))
                 bridge.set_init_segment(obj.payload)
                 logger.info("Stored initialization segment as object=%d (%d bytes)", obj.object_id, len(obj.payload))
                 continue

@@ -112,7 +112,6 @@ class InboundDataStream:
     subgroup_header: Optional[object] = None
     track_name: Optional[FullTrackName] = None
     downstream_streams: Dict[str, int] = field(default_factory=dict)
-    downstream_header_written: bool = False
 
 
 class ObjectCache:
@@ -1014,15 +1013,23 @@ class MOQRelay:
 
         for subscriber in subscribers:
             stream_id = state.downstream_streams.get(subscriber.session_id)
+            payload_to_send = payload
             if stream_id is None:
                 stream_id = await self._open_stream(subscriber, unidirectional=True)
                 state.downstream_streams[subscriber.session_id] = stream_id
+                if state.subgroup_header is None:
+                    raise RuntimeError("subgroup header missing while opening downstream stream")
+                payload_to_send = (
+                    VarInt.encode(StreamType.SUBGROUP_HEADER)
+                    + state.subgroup_header.encode()
+                    + payload
+                )
 
             try:
                 await self._send_stream_bytes(
                     subscriber,
                     stream_id,
-                    payload,
+                    payload_to_send,
                     end_stream=end_stream
                 )
             except Exception as e:
@@ -1034,13 +1041,6 @@ class MOQRelay:
         subgroup_obj: SubgroupObject,
     ):
         """Append a fully parsed subgroup object to the downstream forward buffer."""
-        if not state.downstream_header_written:
-            if state.subgroup_header is None:
-                raise RuntimeError("subgroup header missing while building downstream buffer")
-            state.forward_buffer.extend(VarInt.encode(StreamType.SUBGROUP_HEADER))
-            state.forward_buffer.extend(state.subgroup_header.encode())
-            state.downstream_header_written = True
-
         state.forward_buffer.extend(subgroup_obj.encode())
     
     async def _forward_object(self, track_name: FullTrackName, obj: ObjectDatagram):

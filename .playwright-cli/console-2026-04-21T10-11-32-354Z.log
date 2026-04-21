@@ -1,0 +1,3 @@
+[     437ms] [ERROR] Failed to load resource: the server responded with a status of 404 (Not Found) @ http://localhost:37529/favicon.ico:0
+[     445ms] InvalidStateError: Failed to execute 'addSourceBuffer' on 'MediaSource': The MediaSource's readyState is not 'open'.
+    at mediaSource.addEventListener.once (http://localhost:37529/:468:44)

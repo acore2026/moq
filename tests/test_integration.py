@@ -416,6 +416,77 @@ async def test_relay_forwards_fragmented_subgroup_stream_on_one_downstream_strea
 
 
 @pytest.mark.asyncio
+async def test_relay_prepends_subgroup_header_for_late_subscriber():
+    """Test late subscribers receive a fresh subgroup header on their downstream stream."""
+    logger.info("Testing late subscriber subgroup header forwarding at relay...")
+
+    from moq.relay.relay import MOQRelay, ClientSession, InboundDataStream
+
+    class DummyQuicConnection:
+        def __init__(self):
+            self.sent_streams = []
+            self.next_stream_id = 2
+
+        def get_next_available_stream_id(self, is_unidirectional=False):
+            stream_id = self.next_stream_id
+            self.next_stream_id += 4
+            return stream_id
+
+        def send_stream_data(self, stream_id, data, end_stream=False):
+            self.sent_streams.append((stream_id, data, end_stream))
+
+    class DummyProtocol:
+        def __init__(self):
+            self.transmit_calls = 0
+
+        def transmit(self):
+            self.transmit_calls += 1
+
+    relay = MOQRelay(host="127.0.0.1", port=4443, cache_dir="/tmp/moq_test_cache_late_subscriber")
+
+    track_name = FullTrackName([b"live"], b"video")
+    subgroup_header = SubgroupHeader(
+        track_alias=11,
+        group_id=7,
+        subgroup_id=0,
+        publisher_priority=128,
+    )
+    first_payload = b"first-fragment" * 64
+    second_payload = b"second-fragment" * 64
+
+    state = InboundDataStream(
+        subgroup_header=subgroup_header,
+        track_name=track_name,
+    )
+    relay._append_forward_subgroup_object(state, SubgroupObject(object_id=1, payload=first_payload))
+
+    # No subscribers yet: the relay should drop the buffered bytes without mutating future header behavior.
+    await relay._flush_forward_buffer(track_name, state, end_stream=False)
+    assert state.forward_buffer == bytearray()
+
+    late_subscriber = ClientSession(
+        session_id="late-subscriber",
+        protocol=DummyProtocol(),
+        quic_connection=DummyQuicConnection(),
+    )
+    relay._subscriptions[track_name] = [late_subscriber]
+
+    relay._append_forward_subgroup_object(state, SubgroupObject(object_id=2, payload=second_payload))
+    await relay._flush_forward_buffer(track_name, state, end_stream=False)
+
+    sent = late_subscriber.quic_connection.sent_streams
+    assert len(sent) == 1
+    assert sent[0][1] == (
+        VarInt.encode(StreamType.SUBGROUP_HEADER)
+        + subgroup_header.encode()
+        + SubgroupObject(object_id=2, payload=second_payload).encode()
+    )
+    assert sent[0][2] is False
+
+    logger.info("Late subscriber subgroup header forwarding test passed!\n")
+
+
+@pytest.mark.asyncio
 async def test_cache():
     """Test caching functionality."""
     logger.info("Testing Cache...")
