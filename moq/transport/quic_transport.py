@@ -18,6 +18,8 @@ logger = logging.getLogger(__name__)
 DEFAULT_QUIC_MAX_DATA = 64 * 1024 * 1024
 DEFAULT_QUIC_MAX_STREAM_DATA = 64 * 1024 * 1024
 DEFAULT_QUIC_CONGESTION_CONTROL = "cubic"
+DEFAULT_QUIC_IDLE_TIMEOUT = 300.0
+DEFAULT_QUIC_KEEPALIVE_INTERVAL = 20.0
 
 # Try to import aioquic, provide helpful error if not available
 try:
@@ -81,7 +83,49 @@ class _OrderedCallbackDispatcher:
                 self._logger.exception("Ordered callback failed")
 
 
-class MOQQuicProtocol(QuicConnectionProtocol):
+class _KeepAliveProtocolMixin:
+    """Send periodic QUIC PING frames to prevent idle timeout closure."""
+
+    def _init_keepalive(
+        self,
+        keepalive_logger: logging.Logger,
+        interval: float = DEFAULT_QUIC_KEEPALIVE_INTERVAL,
+    ) -> None:
+        self._keepalive_logger = keepalive_logger
+        self._keepalive_interval = interval
+        self._keepalive_task: Optional[asyncio.Task] = None
+        self._keepalive_ping_uid = 0
+
+    def _start_keepalive(self) -> None:
+        if self._keepalive_interval <= 0:
+            return
+        if self._keepalive_task is None or self._keepalive_task.done():
+            self._keepalive_task = asyncio.create_task(self._keepalive_loop())
+
+    def _stop_keepalive(self) -> None:
+        task = self._keepalive_task
+        self._keepalive_task = None
+        if task is not None and not task.done():
+            task.cancel()
+
+    async def _keepalive_loop(self) -> None:
+        try:
+            while True:
+                await asyncio.sleep(self._keepalive_interval)
+                self._keepalive_ping_uid += 1
+                self._quic.send_ping(self._keepalive_ping_uid)
+                self.transmit()
+                self._keepalive_logger.debug(
+                    "Sent QUIC keepalive PING uid=%d",
+                    self._keepalive_ping_uid,
+                )
+        except asyncio.CancelledError:
+            pass
+        except Exception:
+            self._keepalive_logger.exception("QUIC keepalive loop failed")
+
+
+class MOQQuicProtocol(_KeepAliveProtocolMixin, QuicConnectionProtocol):
     """QUIC protocol handler for MOQ Transport."""
     
     def __init__(self, *args, on_stream_data: Optional[Callable] = None,
@@ -96,12 +140,18 @@ class MOQQuicProtocol(QuicConnectionProtocol):
         self._on_connection_close = on_connection_close
         self._stream_buffers: Dict[int, bytes] = {}
         self._dispatcher = _OrderedCallbackDispatcher(logger)
+        self._init_keepalive(logger)
         logger.info("MOQQuicProtocol initialized")
 
     def connection_made(self, transport):
         """Handle new QUIC connection."""
         super().connection_made(transport)
+        self._start_keepalive()
         self._dispatcher.enqueue(self._on_connection_open, self)
+
+    def connection_lost(self, exc):
+        """Stop connection-local background tasks."""
+        self._stop_keepalive()
     
     def quic_event_received(self, event: QuicEvent) -> None:
         """Handle QUIC events."""
@@ -136,6 +186,7 @@ class MOQQuicProtocol(QuicConnectionProtocol):
             self._dispatcher.enqueue(self._on_datagram, self, data)
         
         elif isinstance(event, ConnectionTerminated):
+            self._stop_keepalive()
             logger.info(f"Connection terminated: error_code={event.error_code}, reason={event.reason_phrase}")
             self._dispatcher.enqueue(
                 self._on_connection_close,
@@ -167,6 +218,7 @@ class QUICClient:
             alpn_protocols=["moq-00"],
             is_client=True,
             congestion_control_algorithm=DEFAULT_QUIC_CONGESTION_CONTROL,
+            idle_timeout=DEFAULT_QUIC_IDLE_TIMEOUT,
             max_data=DEFAULT_QUIC_MAX_DATA,
             max_stream_data=DEFAULT_QUIC_MAX_STREAM_DATA,
             max_datagram_frame_size=65536 if use_datagrams else None,
@@ -293,6 +345,7 @@ class QUICServer:
             alpn_protocols=["moq-00"],
             is_client=False,
             congestion_control_algorithm=DEFAULT_QUIC_CONGESTION_CONTROL,
+            idle_timeout=DEFAULT_QUIC_IDLE_TIMEOUT,
             max_data=DEFAULT_QUIC_MAX_DATA,
             max_stream_data=DEFAULT_QUIC_MAX_STREAM_DATA,
             max_datagram_frame_size=65536 if use_datagrams else None,

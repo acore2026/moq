@@ -13,8 +13,11 @@ from .quic_transport import (
     AIOQUIC_AVAILABLE,
     CRYPTOGRAPHY_AVAILABLE,
     DEFAULT_QUIC_CONGESTION_CONTROL,
+    DEFAULT_QUIC_IDLE_TIMEOUT,
+    DEFAULT_QUIC_KEEPALIVE_INTERVAL,
     DEFAULT_QUIC_MAX_DATA,
     DEFAULT_QUIC_MAX_STREAM_DATA,
+    _KeepAliveProtocolMixin,
     _OrderedCallbackDispatcher,
     DatagramData,
     StreamData,
@@ -44,7 +47,7 @@ if CRYPTOGRAPHY_AVAILABLE:
     from cryptography.x509.oid import NameOID
 
 
-class MOQCombinedServerProtocol(QuicConnectionProtocol):
+class MOQCombinedServerProtocol(_KeepAliveProtocolMixin, QuicConnectionProtocol):
     """One QUIC protocol that accepts either native MOQ or WebTransport."""
 
     def __init__(
@@ -68,8 +71,19 @@ class MOQCombinedServerProtocol(QuicConnectionProtocol):
         self._stream_buffers: Dict[int, bytes] = {}
         self._wt_sessions: Dict[int, WebTransportSessionConnection] = {}
         self._dispatcher = _OrderedCallbackDispatcher(logger)
+        self._init_keepalive(logger, interval=DEFAULT_QUIC_KEEPALIVE_INTERVAL)
+
+    def connection_made(self, transport) -> None:
+        super().connection_made(transport)
+        self._start_keepalive()
+
+    def connection_lost(self, exc) -> None:
+        self._stop_keepalive()
 
     def quic_event_received(self, event: QuicEvent) -> None:
+        if isinstance(event, ConnectionTerminated):
+            self._stop_keepalive()
+
         if isinstance(event, ProtocolNegotiated):
             if event.alpn_protocol in H3_ALPN:
                 self._mode = "webtransport"
@@ -220,6 +234,7 @@ class CombinedTransportServer:
             alpn_protocols=["moq-00", *H3_ALPN],
             is_client=False,
             congestion_control_algorithm=DEFAULT_QUIC_CONGESTION_CONTROL,
+            idle_timeout=DEFAULT_QUIC_IDLE_TIMEOUT,
             max_data=DEFAULT_QUIC_MAX_DATA,
             max_stream_data=DEFAULT_QUIC_MAX_STREAM_DATA,
             max_datagram_frame_size=65536 if use_datagrams else None,

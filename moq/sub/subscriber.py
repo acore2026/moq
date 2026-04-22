@@ -77,6 +77,8 @@ class MOQSubscriber:
         self._data_stream_types: Dict[int, int] = {}
         self._subgroup_headers: Dict[int, SubgroupHeader] = {}
         self._fetch_headers: Dict[int, object] = {}
+        self._pending_precontrol_streams: Dict[int, bytearray] = {}
+        self._pending_precontrol_end_streams: set[int] = set()
         
         logger.info(f"MOQSubscriber initialized for {relay_host}:{relay_port}")
     
@@ -263,8 +265,7 @@ class MOQSubscriber:
         logger.debug(f"Received stream data: stream_id={data.stream_id}, length={len(data.data)}")
 
         if self._peer_control_stream_id is None:
-            self._peer_control_stream_id = data.stream_id
-            await self._handle_control_data(data.data, end_stream=data.end_stream)
+            await self._handle_precontrol_stream_data(data)
             return
 
         if data.stream_id == self._peer_control_stream_id:
@@ -279,6 +280,39 @@ class MOQSubscriber:
         )
         if handled_as_data:
             return
+
+    async def _handle_precontrol_stream_data(self, data: StreamData) -> None:
+        """Buffer incoming streams until the peer control stream is identified."""
+        buffer = self._pending_precontrol_streams.setdefault(data.stream_id, bytearray())
+        buffer.extend(data.data)
+
+        if data.end_stream:
+            self._pending_precontrol_end_streams.add(data.stream_id)
+
+        # A client receives the server's first unidirectional stream as stream 3,
+        # which is where the peer's control stream is opened.
+        if data.stream_id == 3:
+            self._peer_control_stream_id = data.stream_id
+            buffered = bytes(self._pending_precontrol_streams.pop(data.stream_id))
+            end_stream = data.stream_id in self._pending_precontrol_end_streams
+            self._pending_precontrol_end_streams.discard(data.stream_id)
+            await self._handle_control_data(buffered, end_stream=end_stream)
+            await self._flush_pending_precontrol_data_streams()
+            return
+
+        if data.end_stream:
+            buffered = bytes(self._pending_precontrol_streams.pop(data.stream_id))
+            self._pending_precontrol_end_streams.discard(data.stream_id)
+            await self._handle_data_stream(data.stream_id, buffered, end_stream=True)
+
+    async def _flush_pending_precontrol_data_streams(self) -> None:
+        """Replay any data streams that arrived before the control stream."""
+        pending_stream_ids = sorted(self._pending_precontrol_streams)
+        for stream_id in pending_stream_ids:
+            buffered = bytes(self._pending_precontrol_streams.pop(stream_id))
+            end_stream = stream_id in self._pending_precontrol_end_streams
+            self._pending_precontrol_end_streams.discard(stream_id)
+            await self._handle_data_stream(stream_id, buffered, end_stream=end_stream)
 
     async def _handle_control_data(self, data: bytes, end_stream: bool = False):
         """Handle control message data."""

@@ -16,8 +16,11 @@ from .quic_transport import (
     AIOQUIC_AVAILABLE,
     CRYPTOGRAPHY_AVAILABLE,
     DEFAULT_QUIC_CONGESTION_CONTROL,
+    DEFAULT_QUIC_IDLE_TIMEOUT,
+    DEFAULT_QUIC_KEEPALIVE_INTERVAL,
     DEFAULT_QUIC_MAX_DATA,
     DEFAULT_QUIC_MAX_STREAM_DATA,
+    _KeepAliveProtocolMixin,
     _OrderedCallbackDispatcher,
     DatagramData,
     StreamData,
@@ -84,12 +87,20 @@ class WebTransportSessionConnection:
         self.protocol.close(error_code=error_code, reason_phrase=reason)
 
 
-class MOQWebTransportProtocolBase(QuicConnectionProtocol):
+class MOQWebTransportProtocolBase(_KeepAliveProtocolMixin, QuicConnectionProtocol):
     """Shared HTTP/3 + WebTransport protocol logic."""
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self._http: Optional[H3Connection] = None
+        self._init_keepalive(logger, interval=DEFAULT_QUIC_KEEPALIVE_INTERVAL)
+
+    def connection_made(self, transport) -> None:
+        super().connection_made(transport)
+        self._start_keepalive()
+
+    def connection_lost(self, exc) -> None:
+        self._stop_keepalive()
 
     @property
     def http(self) -> H3Connection:
@@ -100,6 +111,8 @@ class MOQWebTransportProtocolBase(QuicConnectionProtocol):
     def quic_event_received(self, event: QuicEvent) -> None:
         if isinstance(event, ProtocolNegotiated) and event.alpn_protocol in H3_ALPN:
             self._http = H3Connection(self._quic, enable_webtransport=True)
+        elif isinstance(event, ConnectionTerminated):
+            self._stop_keepalive()
 
         self._handle_quic_lifecycle_event(event)
 
@@ -330,6 +343,7 @@ class WebTransportClient:
             alpn_protocols=H3_ALPN,
             is_client=True,
             congestion_control_algorithm=DEFAULT_QUIC_CONGESTION_CONTROL,
+            idle_timeout=DEFAULT_QUIC_IDLE_TIMEOUT,
             max_data=DEFAULT_QUIC_MAX_DATA,
             max_stream_data=DEFAULT_QUIC_MAX_STREAM_DATA,
             max_datagram_frame_size=65536 if use_datagrams else None,
@@ -441,6 +455,7 @@ class WebTransportServer:
             alpn_protocols=H3_ALPN,
             is_client=False,
             congestion_control_algorithm=DEFAULT_QUIC_CONGESTION_CONTROL,
+            idle_timeout=DEFAULT_QUIC_IDLE_TIMEOUT,
             max_data=DEFAULT_QUIC_MAX_DATA,
             max_stream_data=DEFAULT_QUIC_MAX_STREAM_DATA,
             max_datagram_frame_size=65536 if use_datagrams else None,
