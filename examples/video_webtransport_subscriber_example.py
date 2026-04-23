@@ -19,9 +19,15 @@ import hashlib
 import ipaddress
 import json
 import logging
+import os
+import platform
+import re
+import shutil
+import signal
+import subprocess
 import tempfile
 from collections import deque
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from email.utils import formatdate
 
 try:
@@ -51,14 +57,17 @@ RELAY_PORT = 4443
 TRACK_NAME = FullTrackName([b"video"], b"h264-live")
 
 PAGE_HOST = "127.0.0.1"
-PAGE_PORT = 8080
+PAGE_PORT = 9004
 WEBTRANSPORT_HOST = "127.0.0.1"
 WEBTRANSPORT_PORT = 4433
 WEBTRANSPORT_PATH = "/wt"
+WEBTRANSPORT_CERT_CACHE_ROOT = os.path.join(tempfile.gettempdir(), "moq-webtransport-browser-certs")
 MAX_REPLAY_FRAGMENTS = 8
 DEFAULT_MSE_CODEC = "avc1.64001F"
 DEFAULT_MIME_TYPE = f'video/mp4; codecs="{DEFAULT_MSE_CODEC}"'
 WEBTRANSPORT_CERT_VALIDITY_DAYS = 7
+LIVE_EDGE_DELAY_SECONDS = 2.0
+MIN_BUFFER_AHEAD_SECONDS = 0.75
 
 # Chrome-family browsers now expect the current WebTransport-over-HTTP/3
 # SETTINGS identifier during session establishment. aioquic still advertises
@@ -528,6 +537,37 @@ HTML_TEMPLATE = """<!doctype html>
         elements.logs.prepend(line);
       }
 
+      function requestPlayback(reason) {
+        const playPromise = elements.video.play();
+        if (playPromise && typeof playPromise.catch === "function") {
+          playPromise.catch((error) => {
+            logLine(`video.play() rejected (${reason}): ${error.message}`);
+          });
+        }
+      }
+
+      function syncPlaybackPosition(reason) {
+        const { buffered } = elements.video;
+        if (!buffered || buffered.length === 0) {
+          return;
+        }
+
+        const lastRange = buffered.length - 1;
+        const rangeStart = buffered.start(lastRange);
+        const rangeEnd = buffered.end(lastRange);
+        const currentTime = elements.video.currentTime || 0;
+        const inRange = currentTime >= rangeStart && currentTime <= rangeEnd;
+
+        const bufferAhead = rangeEnd - currentTime;
+        if (inRange && currentTime !== 0 && bufferAhead >= __MIN_BUFFER_AHEAD_SECONDS__) {
+          return;
+        }
+
+        const liveEdge = Math.max(rangeStart, rangeEnd - __LIVE_EDGE_DELAY_SECONDS__);
+        elements.video.currentTime = liveEdge;
+        logLine(`seeked to buffered range (${reason}): ${liveEdge.toFixed(3)}s`);
+      }
+
       function updateStats() {
         elements.byteCount.textContent = new Intl.NumberFormat().format(state.bytes);
         elements.fragmentCount.textContent = new Intl.NumberFormat().format(state.fragments);
@@ -596,7 +636,14 @@ HTML_TEMPLATE = """<!doctype html>
           return;
         }
         const next = state.appendQueue.shift();
-        state.sourceBuffer.appendBuffer(next);
+        try {
+          state.sourceBuffer.appendBuffer(next);
+        } catch (error) {
+          setConnectionState("append error", "#8e1f0d");
+          elements.statusLine.textContent = "SourceBuffer append failed.";
+          elements.detailLine.textContent = error.message;
+          logLine(`appendBuffer failed: ${error.message}`);
+        }
       }
 
       function ensurePlayer(metadata) {
@@ -611,16 +658,41 @@ HTML_TEMPLATE = """<!doctype html>
 
         const mediaSource = new MediaSource();
         mediaSource.addEventListener("sourceopen", () => {
-          const sourceBuffer = mediaSource.addSourceBuffer(mimeType);
-          sourceBuffer.mode = "segments";
-          sourceBuffer.addEventListener("updateend", flushSourceBuffer);
-          state.sourceBuffer = sourceBuffer;
-          flushSourceBuffer();
+          try {
+            const sourceBuffer = mediaSource.addSourceBuffer(mimeType);
+            sourceBuffer.mode = "segments";
+            sourceBuffer.addEventListener("updateend", () => {
+              logLine("sourceBuffer updateend");
+              syncPlaybackPosition("updateend");
+              flushSourceBuffer();
+              requestPlayback("updateend");
+            });
+            sourceBuffer.addEventListener("error", () => {
+              setConnectionState("buffer error", "#8e1f0d");
+              elements.statusLine.textContent = "SourceBuffer reported an error.";
+              elements.detailLine.textContent = `mime=${mimeType}`;
+              logLine(`sourceBuffer error (${mimeType})`);
+            });
+            state.sourceBuffer = sourceBuffer;
+            logLine(`media source open (${mimeType})`);
+            flushSourceBuffer();
+          } catch (error) {
+            setConnectionState("player error", "#8e1f0d");
+            elements.statusLine.textContent = "Failed to create SourceBuffer.";
+            elements.detailLine.textContent = error.message;
+            logLine(`addSourceBuffer failed: ${error.message}`);
+          }
         }, { once: true });
+        mediaSource.addEventListener("sourceended", () => {
+          logLine("media source ended");
+        });
+        mediaSource.addEventListener("sourceclose", () => {
+          logLine("media source closed");
+        });
 
         state.mediaSource = mediaSource;
         elements.video.src = URL.createObjectURL(mediaSource);
-        elements.video.play().catch(() => {});
+        requestPlayback("player setup");
       }
 
       function enqueueSegment(bytes) {
@@ -655,6 +727,37 @@ HTML_TEMPLATE = """<!doctype html>
           logLine("received end-of-stream marker");
         }
       }
+
+      elements.video.addEventListener("playing", () => {
+        logLine("video playing");
+      });
+      elements.video.addEventListener("waiting", () => {
+        logLine("video waiting");
+        syncPlaybackPosition("waiting");
+      });
+      elements.video.addEventListener("stalled", () => {
+        logLine("video stalled");
+      });
+      elements.video.addEventListener("error", () => {
+        const mediaError = elements.video.error;
+        const detail = mediaError ? `code=${mediaError.code}` : "unknown";
+        setConnectionState("video error", "#8e1f0d");
+        elements.statusLine.textContent = "HTMLMediaElement reported an error.";
+        elements.detailLine.textContent = detail;
+        logLine(`video error (${detail})`);
+      });
+      elements.video.addEventListener("click", () => {
+        requestPlayback("video click");
+      });
+      document.addEventListener("click", () => {
+        requestPlayback("document click");
+      });
+      document.addEventListener("visibilitychange", () => {
+        if (!document.hidden) {
+          logLine("document visible; retrying playback");
+          requestPlayback("visibilitychange");
+        }
+      });
 
       class FrameReader {
         constructor() {
@@ -714,7 +817,9 @@ HTML_TEMPLATE = """<!doctype html>
             updateStats();
             elements.statusLine.textContent = "Playing live fragments from WebTransport.";
             elements.detailLine.textContent = `Appended ${state.fragments} fragment(s) from the MOQ bridge.`;
+            logLine(`fragment received (${payload.byteLength} bytes, count=${state.fragments})`);
             enqueueSegment(payload);
+            requestPlayback("fragment received");
             return;
           }
 
@@ -869,6 +974,123 @@ HTML_TEMPLATE = """<!doctype html>
 """
 
 
+def find_listener_pids(port: int) -> set[int]:
+    """Return process IDs currently listening on the given TCP or UDP port."""
+    if port <= 0:
+        return set()
+
+    system = platform.system()
+    pids: set[int] = set()
+
+    if system == "Windows":
+        result = subprocess.run(
+            ["netstat", "-ano"],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode != 0:
+            return set()
+
+        tcp_pattern = re.compile(rf"^\s*TCP\s+\S+:{port}\s+\S+\s+LISTENING\s+(\d+)\s*$")
+        udp_pattern = re.compile(rf"^\s*UDP\s+\S+:{port}\s+\*:\*\s+(\d+)\s*$")
+        for line in result.stdout.splitlines():
+            match = tcp_pattern.match(line) or udp_pattern.match(line)
+            if match:
+                pids.add(int(match.group(1)))
+        return pids
+
+    if shutil.which("ss"):
+        for args in (
+            ["ss", "-ltnp", f"sport = :{port}"],
+            ["ss", "-lunp", f"sport = :{port}"],
+        ):
+            result = subprocess.run(
+                args,
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            if result.returncode == 0:
+                pids.update(int(pid) for pid in re.findall(r"pid=(\d+)", result.stdout))
+        if pids:
+            return pids
+
+    if shutil.which("lsof"):
+        for args in (
+            ["lsof", f"-tiTCP:{port}", "-sTCP:LISTEN"],
+            ["lsof", f"-tiUDP:{port}"],
+        ):
+            result = subprocess.run(
+                args,
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            if result.returncode == 0:
+                for line in result.stdout.splitlines():
+                    line = line.strip()
+                    if line.isdigit():
+                        pids.add(int(line))
+
+    return pids
+
+
+def stop_listener_processes(port: int) -> list[int]:
+    """Best-effort terminate processes currently listening on the given TCP or UDP port."""
+    stopped: list[int] = []
+    current_pid = os.getpid()
+
+    for pid in sorted(find_listener_pids(port)):
+        if pid == current_pid:
+            continue
+        try:
+            os.kill(pid, signal.SIGTERM)
+            stopped.append(pid)
+        except OSError:
+            logger.debug("Failed to stop pid=%d on port %d", pid, port, exc_info=True)
+
+    if stopped:
+        logger.warning("Stopped existing listener(s) on port %d: %s", port, ", ".join(map(str, stopped)))
+
+    return stopped
+
+
+async def release_listener_port(port: int, label: str) -> bool:
+    """Best-effort stop the current listener on a port and wait briefly for release."""
+    stopped_pids = stop_listener_processes(port)
+    if not stopped_pids:
+        return False
+
+    logger.warning("%s %d was already in use; attempting to reclaim it before startup", label, port)
+    await asyncio.sleep(0.2)
+
+    stubborn_pids = [pid for pid in sorted(find_listener_pids(port)) if pid in set(stopped_pids)]
+    if stubborn_pids and hasattr(signal, "SIGKILL"):
+        for pid in stubborn_pids:
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except OSError:
+                logger.debug("Failed to force-stop pid=%d on port %d", pid, port, exc_info=True)
+        logger.warning(
+            "%s %d still had listener(s) after SIGTERM; force-stopped: %s",
+            label,
+            port,
+            ", ".join(map(str, stubborn_pids)),
+        )
+        await asyncio.sleep(0.2)
+
+    return True
+
+
+def address_in_use_error(label: str, host: str, port: int, exc: OSError) -> OSError:
+    """Build an address-in-use error that includes the exact listener address."""
+    return OSError(
+        exc.errno,
+        f"{label} address already in use: {host}:{port} ({exc.strerror})",
+    )
+
+
 def pack_frame(frame_type: int, payload: bytes = b"") -> bytes:
     """Serialize a binary frame for the browser WebTransport stream."""
     return bytes([frame_type]) + len(payload).to_bytes(4, "big") + payload
@@ -912,15 +1134,53 @@ def build_player_page(
         .replace("__WT_PORT__", str(webtransport_port))
         .replace("__WT_PATH__", WEBTRANSPORT_PATH)
         .replace("__CERT_HASH__", cert_hash_hex)
+        .replace("__LIVE_EDGE_DELAY_SECONDS__", repr(LIVE_EDGE_DELAY_SECONDS))
+        .replace("__MIN_BUFFER_AHEAD_SECONDS__", repr(MIN_BUFFER_AHEAD_SECONDS))
     )
     return html.encode("utf-8")
 
 
-def generate_webtransport_certificate(host: str) -> tuple[str, str, str, tempfile.TemporaryDirectory]:
-    """Generate a temporary self-signed certificate and return its SHA-256 digest."""
-    temp_dir = tempfile.TemporaryDirectory(prefix="moq-webtransport-")
-    cert_path = f"{temp_dir.name}/cert.pem"
-    key_path = f"{temp_dir.name}/key.pem"
+class CachedCertificateDirectory:
+    """Cleanup-compatible wrapper for a persistent short-lived certificate directory."""
+
+    def __init__(self, name: str):
+        self.name = name
+
+    def cleanup(self):
+        return None
+
+
+def _certificate_hash(cert_path: str) -> str:
+    with open(cert_path, "rb") as cert_file:
+        cert = x509.load_pem_x509_certificate(cert_file.read())
+    return hashlib.sha256(cert.public_bytes(serialization.Encoding.DER)).hexdigest()
+
+
+def _cached_certificate_is_usable(cert_path: str, key_path: str) -> bool:
+    if not os.path.exists(cert_path) or not os.path.exists(key_path):
+        return False
+
+    try:
+        with open(cert_path, "rb") as cert_file:
+            cert = x509.load_pem_x509_certificate(cert_file.read())
+    except Exception:
+        return False
+
+    now = datetime.now(timezone.utc)
+    return cert.not_valid_before_utc <= now < cert.not_valid_after_utc - timedelta(hours=1)
+
+
+def generate_webtransport_certificate(host: str) -> tuple[str, str, str, CachedCertificateDirectory]:
+    """Generate or reuse a short-lived self-signed certificate and return its SHA-256 digest."""
+    safe_host = re.sub(r"[^A-Za-z0-9_.-]", "_", host)
+    cert_dir = os.path.join(WEBTRANSPORT_CERT_CACHE_ROOT, safe_host)
+    cert_path = os.path.join(cert_dir, "cert.pem")
+    key_path = os.path.join(cert_dir, "key.pem")
+
+    if _cached_certificate_is_usable(cert_path, key_path):
+        return cert_path, key_path, _certificate_hash(cert_path), CachedCertificateDirectory(cert_dir)
+
+    os.makedirs(cert_dir, exist_ok=True)
 
     # Browsers only honor WebTransport serverCertificateHashes for short-lived
     # certificates backed by interoperable ECDSA keys.
@@ -941,8 +1201,8 @@ def generate_webtransport_certificate(host: str) -> tuple[str, str, str, tempfil
         .issuer_name(issuer)
         .public_key(key.public_key())
         .serial_number(x509.random_serial_number())
-        .not_valid_before(datetime.utcnow() - timedelta(minutes=1))
-        .not_valid_after(datetime.utcnow() + timedelta(days=WEBTRANSPORT_CERT_VALIDITY_DAYS))
+        .not_valid_before(datetime.now(timezone.utc) - timedelta(minutes=1))
+        .not_valid_after(datetime.now(timezone.utc) + timedelta(days=WEBTRANSPORT_CERT_VALIDITY_DAYS))
         .add_extension(x509.SubjectAlternativeName(san_values), critical=False)
         .sign(key, hashes.SHA256())
     )
@@ -960,7 +1220,7 @@ def generate_webtransport_certificate(host: str) -> tuple[str, str, str, tempfil
         )
 
     cert_hash = hashlib.sha256(cert.public_bytes(serialization.Encoding.DER)).hexdigest()
-    return cert_path, key_path, cert_hash, temp_dir
+    return cert_path, key_path, cert_hash, CachedCertificateDirectory(cert_dir)
 
 
 class BrowserBroadcastState:
@@ -1207,21 +1467,53 @@ class BrowserPageServer:
             raise RuntimeError("Browser page server has not started yet")
         return self._bound_port
 
+    async def _start_on_port(self, port: int):
+        self._server = await asyncio.start_server(self._handle_client, self._host, port)
+
+    async def _try_release_preferred_port(self) -> bool:
+        if self._preferred_port == 0:
+            return False
+        return await release_listener_port(self._preferred_port, "Browser page port")
+
     async def start(self):
+        await self._try_release_preferred_port()
+
         try:
-            self._server = await asyncio.start_server(self._handle_client, self._host, self._preferred_port)
+            await self._start_on_port(self._preferred_port)
         except OSError as exc:
-            if (
-                exc.errno != errno.EADDRINUSE
-                or not self._fallback_to_ephemeral
-                or self._preferred_port == 0
-            ):
+            if exc.errno != errno.EADDRINUSE or self._preferred_port == 0:
                 raise
+
+            if await self._try_release_preferred_port():
+                try:
+                    await self._start_on_port(self._preferred_port)
+                    sockets = self._server.sockets or []
+                    if not sockets:
+                        raise RuntimeError("Browser page server did not expose a listening socket")
+                    self._bound_port = int(sockets[0].getsockname()[1])
+                    logger.info("Browser page available at http://localhost:%d", self.port)
+                    return
+                except OSError as retry_exc:
+                    if retry_exc.errno != errno.EADDRINUSE or not self._fallback_to_ephemeral:
+                        raise address_in_use_error(
+                            "Browser page",
+                            self._host,
+                            self._preferred_port,
+                            retry_exc,
+                        ) from retry_exc
+            elif not self._fallback_to_ephemeral:
+                raise address_in_use_error(
+                    "Browser page",
+                    self._host,
+                    self._preferred_port,
+                    exc,
+                ) from exc
+
             logger.warning(
                 "Browser page port %d is already in use; falling back to an ephemeral localhost port",
                 self._preferred_port,
             )
-            self._server = await asyncio.start_server(self._handle_client, self._host, 0)
+            await self._start_on_port(0)
 
         sockets = self._server.sockets or []
         if not sockets:
@@ -1368,17 +1660,28 @@ async def main():
             f"http://localhost:{page_server.port}",
             f"http://127.0.0.1:{page_server.port}",
         }
-        webtransport_server = await serve(
-            WEBTRANSPORT_HOST,
-            WEBTRANSPORT_PORT,
-            configuration=quic_config,
-            create_protocol=lambda *args, **kwargs: BrowserBridgeProtocol(
-                *args,
-                bridge=bridge,
-                allowed_origins=allowed_origins,
-                **kwargs,
-            ),
-        )
+        await release_listener_port(WEBTRANSPORT_PORT, "WebTransport bridge port")
+        try:
+            webtransport_server = await serve(
+                WEBTRANSPORT_HOST,
+                WEBTRANSPORT_PORT,
+                configuration=quic_config,
+                create_protocol=lambda *args, **kwargs: BrowserBridgeProtocol(
+                    *args,
+                    bridge=bridge,
+                    allowed_origins=allowed_origins,
+                    **kwargs,
+                ),
+            )
+        except OSError as exc:
+            if exc.errno == errno.EADDRINUSE:
+                raise address_in_use_error(
+                    "WebTransport bridge",
+                    WEBTRANSPORT_HOST,
+                    WEBTRANSPORT_PORT,
+                    exc,
+                ) from exc
+            raise
         logger.info(
             "WebTransport bridge listening at https://%s:%d%s (cert sha256=%s)",
             WEBTRANSPORT_HOST,

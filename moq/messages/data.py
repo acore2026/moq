@@ -12,10 +12,10 @@ from moq.encoding import VarInt, encode_bytes, decode_bytes, KeyValuePair
 class ObjectStatus(IntEnum):
     """Object status codes."""
     NORMAL = 0x00
-    NON_EXISTENT = 0x01
-    END_OF_GROUP = 0x02
-    END_OF_TRACK = 0x03
-    END_OF_SUBGROUP = 0x04
+    NON_EXISTENT = 0x01  # Legacy/non-standard.
+    END_OF_GROUP = 0x03
+    END_OF_TRACK = 0x04
+    END_OF_SUBGROUP = 0x05  # Legacy/non-standard.
 
 
 class ForwardingPreference(IntEnum):
@@ -87,44 +87,109 @@ class ObjectHeader:
 class ObjectDatagram:
     """
     Object sent as a datagram.
-    Format: Object Header + Payload Length + Payload + Extensions
+
+    This implements the draft-17 outer OBJECT_DATAGRAM wire shape with a
+    leading Type field. The current implementation only emits the simple
+    variant we actually use today: Track Alias + Group ID + Object ID +
+    Publisher Priority + payload, or Track Alias + Group ID + Object ID +
+    Publisher Priority + Object Status for status-only objects.
     """
     header: ObjectHeader
     payload: bytes
     extensions: Optional[bytes] = None
+
+    TYPE_PAYLOAD = 0x00
+    TYPE_STATUS = 0x20
+    TYPE_END_OF_GROUP = 0x02
     
     def encode(self) -> bytes:
         """Encode object datagram."""
-        data = self.header.encode()
-        data += VarInt.encode(len(self.payload))
-        data += self.payload
+        data = bytearray()
+        if self.header.object_status == ObjectStatus.NORMAL and self.payload:
+            datagram_type = self.TYPE_PAYLOAD
+        elif self.header.object_status == ObjectStatus.END_OF_GROUP and not self.payload:
+            datagram_type = self.TYPE_END_OF_GROUP
+        else:
+            datagram_type = self.TYPE_STATUS
+
+        data.extend(VarInt.encode(datagram_type))
+        data.extend(VarInt.encode(self.header.track_alias))
+        data.extend(VarInt.encode(self.header.group_id))
+        data.extend(VarInt.encode(self.header.object_id))
+        data.append(self.header.publisher_priority)
+
+        if datagram_type == self.TYPE_STATUS:
+            data.extend(VarInt.encode(self.header.object_status))
+        else:
+            data.extend(self.payload)
         if self.extensions:
-            data += self.extensions
-        return data
+            data.extend(self.extensions)
+        return bytes(data)
     
     @staticmethod
     def decode(data: bytes, offset: int = 0) -> Tuple['ObjectDatagram', int]:
         """Decode object datagram from bytes."""
         start_offset = offset
-        
-        header, consumed = ObjectHeader.decode(data, offset)
+
+        datagram_type, consumed = VarInt.decode(data, offset)
         offset += consumed
-        
-        payload_len, consumed = VarInt.decode(data, offset)
-        offset += consumed
-        
-        if offset + payload_len > len(data):
-            raise ValueError("Insufficient data for datagram payload")
-        payload = data[offset:offset + payload_len]
-        offset += payload_len
-        
+
+        if datagram_type & 0x01:
+            raise ValueError("OBJECT_DATAGRAM properties are not supported")
+        if datagram_type & 0x10:
+            raise ValueError(f"Invalid OBJECT_DATAGRAM type: {datagram_type:#x}")
+        if datagram_type & 0x04:
+            object_id = 0
+        else:
+            track_alias, consumed = VarInt.decode(data, offset)
+            offset += consumed
+            group_id, consumed = VarInt.decode(data, offset)
+            offset += consumed
+            object_id, consumed = VarInt.decode(data, offset)
+            offset += consumed
+            if datagram_type & 0x08:
+                raise ValueError("OBJECT_DATAGRAM default priority is not supported")
+            if offset >= len(data):
+                raise ValueError("Insufficient data for datagram publisher priority")
+            publisher_priority = data[offset]
+            offset += 1
+        if datagram_type & 0x04:
+            track_alias, consumed = VarInt.decode(data, offset)
+            offset += consumed
+            group_id, consumed = VarInt.decode(data, offset)
+            offset += consumed
+            if datagram_type & 0x08:
+                raise ValueError("OBJECT_DATAGRAM default priority is not supported")
+            if offset >= len(data):
+                raise ValueError("Insufficient data for datagram publisher priority")
+            publisher_priority = data[offset]
+            offset += 1
+
+        payload = b""
+        object_status = ObjectStatus.NORMAL
+        if datagram_type & 0x20:
+            status_value, consumed = VarInt.decode(data, offset)
+            offset += consumed
+            object_status = ObjectStatus(status_value)
+        else:
+            payload = data[offset:]
+            offset = len(data)
+            if datagram_type & 0x02:
+                object_status = ObjectStatus.END_OF_GROUP
+
         extensions = None
-        if offset < len(data):
+        if datagram_type & 0x20 and offset < len(data):
             extensions = data[offset:]
             offset = len(data)
         
         return ObjectDatagram(
-            header=header,
+            header=ObjectHeader(
+                track_alias=track_alias,
+                group_id=group_id,
+                object_id=object_id,
+                publisher_priority=publisher_priority,
+                object_status=object_status,
+            ),
             payload=payload,
             extensions=extensions
         ), offset - start_offset
@@ -179,47 +244,67 @@ class SubgroupHeader:
 class SubgroupObject:
     """
     Object within a subgroup stream.
-    Format: Object ID, [Object Status], [Payload Length], Payload
+    Format: Object ID Delta, [Properties], Payload Length, [Status], [Payload]
     """
     object_id: int
     payload: bytes
     object_status: ObjectStatus = ObjectStatus.NORMAL
     
-    def encode(self) -> bytes:
+    def encode(self, previous_object_id: Optional[int] = None) -> bytes:
         """Encode subgroup object."""
-        data = VarInt.encode(self.object_id)
-        if self.object_status != ObjectStatus.NORMAL:
-            data += VarInt.encode(self.object_status)
+        if previous_object_id is None:
+            object_id_delta = self.object_id
         else:
-            data += VarInt.encode(len(self.payload))
-            data += self.payload
-        return data
+            object_id_delta = self.object_id - previous_object_id - 1
+            if object_id_delta < 0:
+                raise ValueError("Subgroup object_id must be strictly increasing")
+
+        data = bytearray()
+        data.extend(VarInt.encode(object_id_delta))
+
+        payload_len = len(self.payload)
+        if self.object_status != ObjectStatus.NORMAL:
+            payload_len = 0
+
+        data.extend(VarInt.encode(payload_len))
+        if payload_len == 0:
+            data.extend(VarInt.encode(self.object_status))
+        else:
+            data.extend(self.payload)
+        return bytes(data)
     
     @staticmethod
-    def decode(data: bytes, offset: int = 0) -> Tuple['SubgroupObject', int]:
+    def decode(
+        data: bytes,
+        offset: int = 0,
+        previous_object_id: Optional[int] = None,
+    ) -> Tuple['SubgroupObject', int]:
         """Decode subgroup object from bytes."""
         start_offset = offset
-        object_id, consumed = VarInt.decode(data, offset)
+        object_id_delta, consumed = VarInt.decode(data, offset)
         offset += consumed
-        
-        # Check for status or length
-        next_val, consumed = VarInt.decode(data, offset)
-        offset += consumed
-        
-        payload = b''
-        object_status = ObjectStatus.NORMAL
-        
-        if next_val in (ObjectStatus.NON_EXISTENT, ObjectStatus.END_OF_GROUP, 
-                        ObjectStatus.END_OF_TRACK, ObjectStatus.END_OF_SUBGROUP):
-            object_status = ObjectStatus(next_val)
+
+        if previous_object_id is None:
+            object_id = object_id_delta
         else:
-            # It's a length
-            payload_len = next_val
+            object_id = previous_object_id + object_id_delta + 1
+
+        payload_len, consumed = VarInt.decode(data, offset)
+        offset += consumed
+
+        payload = b""
+        object_status = ObjectStatus.NORMAL
+
+        if payload_len == 0:
+            status_value, consumed = VarInt.decode(data, offset)
+            offset += consumed
+            object_status = ObjectStatus(status_value)
+        else:
             if offset + payload_len > len(data):
                 raise ValueError("Insufficient data for subgroup payload")
             payload = data[offset:offset + payload_len]
             offset += payload_len
-        
+
         return SubgroupObject(
             object_id=object_id,
             payload=payload,
@@ -246,9 +331,104 @@ class FetchHeader:
         return FetchHeader(subscribe_id), consumed
 
 
+@dataclass
+class FetchObject:
+    """
+    Object serialization used after FETCH_HEADER on a fetch stream.
+
+    This implements the simple standalone form we currently emit:
+    explicit Group ID, Object ID, Publisher Priority and payload, with
+    the datagram/subgroup-specific fields omitted.
+    """
+
+    group_id: int
+    object_id: int
+    publisher_priority: int
+    payload: bytes
+    subgroup_id: Optional[int] = None
+
+    FLAGS_DATAGRAM_LIKE = 0x40
+    FLAGS_GROUP_PRESENT = 0x08
+    FLAGS_OBJECT_PRESENT = 0x04
+    FLAGS_PRIORITY_PRESENT = 0x10
+
+    def encode(self) -> bytes:
+        flags = self.FLAGS_DATAGRAM_LIKE | self.FLAGS_GROUP_PRESENT | self.FLAGS_OBJECT_PRESENT
+        flags |= self.FLAGS_PRIORITY_PRESENT
+
+        data = bytearray()
+        data.extend(VarInt.encode(flags))
+        data.extend(VarInt.encode(self.group_id))
+        data.extend(VarInt.encode(self.object_id))
+        data.append(self.publisher_priority)
+        data.extend(VarInt.encode(len(self.payload)))
+        data.extend(self.payload)
+        return bytes(data)
+
+    @staticmethod
+    def decode(data: bytes, offset: int = 0) -> Tuple['FetchObject', int]:
+        start_offset = offset
+        flags, consumed = VarInt.decode(data, offset)
+        offset += consumed
+
+        if flags in (0x8C, 0x10C):
+            raise ValueError("Fetch end-of-range markers are not supported")
+        if flags & 0x20:
+            raise ValueError("Fetch object properties are not supported")
+        if not (flags & FetchObject.FLAGS_GROUP_PRESENT):
+            raise ValueError("Fetch object without explicit group_id is not supported")
+        if not (flags & FetchObject.FLAGS_OBJECT_PRESENT):
+            raise ValueError("Fetch object without explicit object_id is not supported")
+        if not (flags & FetchObject.FLAGS_PRIORITY_PRESENT):
+            raise ValueError("Fetch object without explicit priority is not supported")
+
+        subgroup_encoding = flags & 0x03
+        subgroup_id = None
+
+        group_id, consumed = VarInt.decode(data, offset)
+        offset += consumed
+
+        if not (flags & 0x40):
+            if subgroup_encoding != 0x03:
+                raise ValueError("Fetch object subgroup delta encoding is not supported")
+            subgroup_id, consumed = VarInt.decode(data, offset)
+            offset += consumed
+
+        object_id, consumed = VarInt.decode(data, offset)
+        offset += consumed
+
+        if offset >= len(data):
+            raise ValueError("Insufficient data for fetch object priority")
+        publisher_priority = data[offset]
+        offset += 1
+
+        payload_len, consumed = VarInt.decode(data, offset)
+        offset += consumed
+        if offset + payload_len > len(data):
+            raise ValueError("Insufficient data for fetch object payload")
+        payload = data[offset:offset + payload_len]
+        offset += payload_len
+
+        return FetchObject(
+            group_id=group_id,
+            subgroup_id=subgroup_id,
+            object_id=object_id,
+            publisher_priority=publisher_priority,
+            payload=payload,
+        ), offset - start_offset
+
+
 # Stream type identifiers
 class StreamType(IntEnum):
     """Unidirectional stream types."""
     OBJECT_DATAGRAM = 0x00
-    SUBGROUP_HEADER = 0x01
-    FETCH_HEADER = 0x02
+    SUBGROUP_HEADER = 0x14
+    FETCH_HEADER = 0x05
+
+
+def is_subgroup_stream_type(stream_type: int) -> bool:
+    """Return True when the stream type is a valid draft-17 subgroup header type."""
+    if not (0x10 <= stream_type <= 0x1F or 0x30 <= stream_type <= 0x3F):
+        return False
+    subgroup_id_mode = (stream_type & 0x06) >> 1
+    return subgroup_id_mode != 0x03

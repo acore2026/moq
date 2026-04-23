@@ -9,7 +9,7 @@ import logging
 import ssl
 import tempfile
 from collections import deque
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Optional, Callable, Dict, Deque, Set, Tuple, Any
 from dataclasses import dataclass
 
@@ -27,7 +27,7 @@ try:
     from aioquic.quic.configuration import QuicConfiguration
     from aioquic.quic.connection import QuicConnection
     from aioquic.quic.events import (
-        QuicEvent, StreamDataReceived, StreamReset, ConnectionTerminated,
+        QuicEvent, StreamDataReceived, StreamReset, StopSendingReceived, ConnectionTerminated,
         DatagramFrameReceived
     )
     AIOQUIC_AVAILABLE = True
@@ -57,6 +57,19 @@ class StreamData:
 class DatagramData:
     """Data received as datagram."""
     data: bytes
+
+
+@dataclass
+class StreamResetData:
+    """Peer-initiated stream termination signal."""
+    stream_id: int
+    error_code: int
+    event_type: str = "reset"
+
+
+def is_unidirectional_stream_id(stream_id: int) -> bool:
+    """Return True when a QUIC/WebTransport stream id is unidirectional."""
+    return bool(stream_id & 0x02)
 
 
 class _OrderedCallbackDispatcher:
@@ -129,12 +142,14 @@ class MOQQuicProtocol(_KeepAliveProtocolMixin, QuicConnectionProtocol):
     """QUIC protocol handler for MOQ Transport."""
     
     def __init__(self, *args, on_stream_data: Optional[Callable] = None,
+                 on_stream_reset: Optional[Callable] = None,
                  on_datagram: Optional[Callable] = None,
                  on_connection_open: Optional[Callable] = None,
                  on_connection_close: Optional[Callable] = None,
                  **kwargs):
         super().__init__(*args, **kwargs)
         self._on_stream_data = on_stream_data
+        self._on_stream_reset = on_stream_reset
         self._on_datagram = on_datagram
         self._on_connection_open = on_connection_open
         self._on_connection_close = on_connection_close
@@ -179,6 +194,27 @@ class MOQQuicProtocol(_KeepAliveProtocolMixin, QuicConnectionProtocol):
             logger.warning(f"Stream reset: stream_id={event.stream_id}, error_code={event.error_code}")
             if event.stream_id in self._stream_buffers:
                 del self._stream_buffers[event.stream_id]
+            self._dispatcher.enqueue(
+                self._on_stream_reset,
+                self,
+                StreamResetData(
+                    stream_id=event.stream_id,
+                    error_code=event.error_code,
+                    event_type="reset",
+                ),
+            )
+        
+        elif isinstance(event, StopSendingReceived):
+            logger.warning(f"STOP_SENDING received: stream_id={event.stream_id}, error_code={event.error_code}")
+            self._dispatcher.enqueue(
+                self._on_stream_reset,
+                self,
+                StreamResetData(
+                    stream_id=event.stream_id,
+                    error_code=event.error_code,
+                    event_type="stop_sending",
+                ),
+            )
         
         elif isinstance(event, DatagramFrameReceived):
             logger.debug(f"Datagram received: length={len(event.data)}")
@@ -234,10 +270,12 @@ class QUICClient:
     
     def set_handlers(self, 
                      on_stream_data: Optional[Callable] = None,
+                     on_stream_reset: Optional[Callable] = None,
                      on_datagram: Optional[Callable] = None,
                      on_close: Optional[Callable] = None):
         """Set event handlers."""
         self._on_stream_data = on_stream_data
+        self._on_stream_reset = on_stream_reset
         self._on_datagram = on_datagram
         self._on_close = on_close
     
@@ -256,6 +294,7 @@ class QUICClient:
                 create_protocol=lambda *args, **kwargs: MOQQuicProtocol(
                     *args,
                     on_stream_data=self._on_stream_data,
+                    on_stream_reset=self._on_stream_reset,
                     on_datagram=self._on_datagram,
                     on_connection_close=self._on_close,
                     **kwargs
@@ -306,6 +345,30 @@ class QUICClient:
         self._connection.send_datagram_frame(data)
         self.protocol.transmit()
         logger.debug(f"Sent datagram: {len(data)} bytes")
+
+    async def stop_stream(self, stream_id: int, error_code: int = 0):
+        """Send STOP_SENDING for a peer-initiated stream."""
+        if not self.protocol:
+            raise RuntimeError("Not connected")
+
+        stop_stream = getattr(self._connection, "stop_stream", None)
+        if not callable(stop_stream):
+            raise RuntimeError("Underlying QUIC connection does not support STOP_SENDING")
+        stop_stream(stream_id, error_code)
+        self.protocol.transmit()
+        logger.debug(f"Sent STOP_SENDING on stream {stream_id} error={error_code}")
+
+    async def reset_stream(self, stream_id: int, error_code: int = 0):
+        """Reset a locally initiated stream."""
+        if not self.protocol:
+            raise RuntimeError("Not connected")
+
+        reset_stream = getattr(self._connection, "reset_stream", None)
+        if not callable(reset_stream):
+            raise RuntimeError("Underlying QUIC connection does not support RESET_STREAM")
+        reset_stream(stream_id, error_code)
+        self.protocol.transmit()
+        logger.debug(f"Sent RESET_STREAM on stream {stream_id} error={error_code}")
     
     def close(self):
         """Close the connection."""
@@ -337,6 +400,7 @@ class QUICServer:
         self._server = None
         self._on_client_connect: Optional[Callable] = None
         self._on_stream_data: Optional[Callable] = None
+        self._on_stream_reset: Optional[Callable] = None
         self._on_datagram: Optional[Callable] = None
         self._on_client_disconnect: Optional[Callable] = None
         
@@ -365,11 +429,13 @@ class QUICServer:
     def set_handlers(self,
                      on_client_connect: Optional[Callable] = None,
                      on_stream_data: Optional[Callable] = None,
+                     on_stream_reset: Optional[Callable] = None,
                      on_datagram: Optional[Callable] = None,
                      on_client_disconnect: Optional[Callable] = None):
         """Set event handlers."""
         self._on_client_connect = on_client_connect
         self._on_stream_data = on_stream_data
+        self._on_stream_reset = on_stream_reset
         self._on_datagram = on_datagram
         self._on_client_disconnect = on_client_disconnect
     
@@ -378,6 +444,7 @@ class QUICServer:
         return MOQQuicProtocol(
             *args,
             on_stream_data=self._on_stream_data,
+            on_stream_reset=self._on_stream_reset,
             on_datagram=self._on_datagram,
             on_connection_open=self._on_client_connect,
             on_connection_close=self._on_client_disconnect,
@@ -416,8 +483,8 @@ class QUICServer:
             .issuer_name(issuer)
             .public_key(key.public_key())
             .serial_number(x509.random_serial_number())
-            .not_valid_before(datetime.utcnow() - timedelta(minutes=1))
-            .not_valid_after(datetime.utcnow() + timedelta(days=30))
+            .not_valid_before(datetime.now(timezone.utc) - timedelta(minutes=1))
+            .not_valid_after(datetime.now(timezone.utc) + timedelta(days=30))
             .add_extension(x509.SubjectAlternativeName(san_values), critical=False)
             .sign(key, hashes.SHA256())
         )

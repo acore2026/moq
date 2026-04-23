@@ -30,6 +30,16 @@ def test_publisher_metadata_uses_matching_browser_codec():
     assert video_publisher_example.DEFAULT_MIME_TYPE == 'video/mp4; codecs="avc1.64001F"'
 
 
+def test_build_ffmpeg_command_uses_shorter_keyframe_interval_for_smoother_live_playback():
+    command = video_publisher_example.build_ffmpeg_command(include_timestamp=False)
+    g_index = command.index("-g")
+    keyint_index = command.index("-keyint_min")
+
+    assert command[g_index + 1] == str(video_publisher_example.KEYFRAME_INTERVAL_FRAMES)
+    assert command[keyint_index + 1] == str(video_publisher_example.KEYFRAME_INTERVAL_FRAMES)
+    assert video_publisher_example.KEYFRAME_INTERVAL_FRAMES < video_publisher_example.FRAME_RATE
+
+
 def test_fragmented_mp4_muxer_splits_init_and_media_fragments():
     muxer = video_publisher_example.FragmentedMp4Muxer()
     init_boxes = _make_box(b"ftyp", b"init-a") + _make_box(b"moov", b"init-b")

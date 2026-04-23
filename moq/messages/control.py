@@ -13,36 +13,36 @@ from moq.encoding import VarInt, encode_bytes, decode_bytes, Parameters, Locatio
 class MessageType(IntEnum):
     """MOQT Control Message Types."""
     # Session messages
-    SETUP = 0x01
+    SETUP = 0x2F00
     GOAWAY = 0x10
     
     # Request messages
-    REQUEST_OK = 0x02
-    REQUEST_ERROR = 0x03
+    REQUEST_OK = 0x07
+    REQUEST_ERROR = 0x05
     
     # Subscribe messages
-    SUBSCRIBE = 0x04
-    SUBSCRIBE_OK = 0x05
-    REQUEST_UPDATE = 0x06
+    SUBSCRIBE = 0x03
+    SUBSCRIBE_OK = 0x04
+    REQUEST_UPDATE = 0x02
     
     # Publish messages
-    PUBLISH = 0x07
-    PUBLISH_OK = 0x08
-    PUBLISH_DONE = 0x09
+    PUBLISH = 0x1D
+    PUBLISH_OK = 0x1E
+    PUBLISH_DONE = 0x0B
     
     # Fetch messages
-    FETCH = 0x0A
-    FETCH_OK = 0x0B
+    FETCH = 0x16
+    FETCH_OK = 0x18
     
     # Status messages
-    TRACK_STATUS = 0x0C
+    TRACK_STATUS = 0x0D
     
     # Namespace messages
-    PUBLISH_NAMESPACE = 0x0D
-    NAMESPACE = 0x0E
-    NAMESPACE_DONE = 0x0F
+    PUBLISH_NAMESPACE = 0x06
+    NAMESPACE = 0x08
+    NAMESPACE_DONE = 0x0E
     SUBSCRIBE_NAMESPACE = 0x11
-    PUBLISH_BLOCKED = 0x12
+    PUBLISH_BLOCKED = 0x0F
 
 
 # Error codes
@@ -55,6 +55,18 @@ class ErrorCode(IntEnum):
     PARAMETER_LENGTH_MISMATCH = 0x04
     GOAWAY_TIMEOUT = 0x10
     KEY_VALUE_FORMATTING_ERROR = 0xF0
+
+
+class StreamResetCode(IntEnum):
+    """MOQT stream reset / STOP_SENDING codes."""
+    INTERNAL_ERROR = 0x00
+    CANCELLED = 0x01
+    DELIVERY_TIMEOUT = 0x02
+    SESSION_CLOSED = 0x03
+    UNKNOWN_OBJECT_STATUS = 0x04
+    TOO_FAR_BEHIND = 0x05
+    EXCESSIVE_LOAD = 0x09
+    MALFORMED_TRACK = 0x12
 
 
 class SubscribeFilter(IntEnum):
@@ -70,6 +82,100 @@ class GroupOrder(IntEnum):
     """Group ordering for delivery."""
     ASCENDING = 0x00
     DESCENDING = 0x01
+
+
+class ParameterType(IntEnum):
+    """MOQT message parameter types used by the current implementation."""
+    EXPIRES = 0x08
+    LARGEST_OBJECT = 0x09
+    FORWARD = 0x10
+    SUBSCRIBER_PRIORITY = 0x20
+    SUBSCRIPTION_FILTER = 0x21
+    GROUP_ORDER = 0x22
+    NEW_GROUP_REQUEST = 0x32
+
+
+class PublishDoneStatus(IntEnum):
+    """PUBLISH_DONE status codes for subscriptions/publications."""
+    INTERNAL_ERROR = 0x00
+    UNAUTHORIZED = 0x01
+    TRACK_ENDED = 0x02
+    SUBSCRIPTION_ENDED = 0x03
+    GOING_AWAY = 0x04
+    EXPIRED = 0x05
+    TOO_FAR_BEHIND = 0x06
+    UPDATE_FAILED = 0x08
+    EXCESSIVE_LOAD = 0x09
+    MALFORMED_TRACK = 0x12
+
+
+UNKNOWN_PUBLISH_DONE_STREAM_COUNT = (1 << 62) - 1
+
+
+@dataclass
+class SubscriptionFilterValue:
+    """Draft-17 SUBSCRIPTION_FILTER parameter value."""
+    filter_type: SubscribeFilter
+    start_group: Optional[int] = None
+    start_object: Optional[int] = None
+    end_group_delta: Optional[int] = None
+
+    def encode(self) -> bytes:
+        payload = bytearray()
+        payload.extend(VarInt.encode(self.filter_type))
+        if self.filter_type in (SubscribeFilter.ABSOLUTE_START, SubscribeFilter.ABSOLUTE_RANGE):
+            if self.start_group is None or self.start_object is None:
+                raise ValueError("absolute subscription filters require a start location")
+            payload.extend(Location(self.start_group, self.start_object).encode())
+        if self.filter_type == SubscribeFilter.ABSOLUTE_RANGE:
+            if self.end_group_delta is None:
+                raise ValueError("absolute range requires end_group_delta")
+            payload.extend(VarInt.encode(self.end_group_delta))
+        return bytes(payload)
+
+    @staticmethod
+    def decode(data: bytes, offset: int = 0) -> Tuple['SubscriptionFilterValue', int]:
+        start_offset = offset
+        filter_type_value, consumed = VarInt.decode(data, offset)
+        offset += consumed
+        filter_type = SubscribeFilter(filter_type_value)
+
+        start_group = None
+        start_object = None
+        end_group_delta = None
+        if filter_type in (SubscribeFilter.ABSOLUTE_START, SubscribeFilter.ABSOLUTE_RANGE):
+            location, consumed = Location.decode(data, offset)
+            offset += consumed
+            start_group = location.group
+            start_object = location.object_id
+        if filter_type == SubscribeFilter.ABSOLUTE_RANGE:
+            end_group_delta, consumed = VarInt.decode(data, offset)
+            offset += consumed
+
+        return SubscriptionFilterValue(
+            filter_type=filter_type,
+            start_group=start_group,
+            start_object=start_object,
+            end_group_delta=end_group_delta,
+        ), offset - start_offset
+
+
+def group_order_to_parameter_value(group_order: GroupOrder) -> int:
+    """Map internal GroupOrder to the draft-17 parameter value."""
+    if group_order == GroupOrder.ASCENDING:
+        return 0x1
+    if group_order == GroupOrder.DESCENDING:
+        return 0x2
+    raise ValueError(f"Unsupported group order: {group_order}")
+
+
+def group_order_from_parameter_value(value: int) -> GroupOrder:
+    """Map the draft-17 parameter value to internal GroupOrder."""
+    if value == 0x1:
+        return GroupOrder.ASCENDING
+    if value == 0x2:
+        return GroupOrder.DESCENDING
+    raise ValueError(f"Invalid GROUP_ORDER parameter value: {value}")
 
 
 @dataclass
@@ -133,22 +239,31 @@ class GoAwayMessage:
 class RequestOkMessage:
     """REQUEST_OK message."""
     request_id: int
-    expires: Optional[int] = None  # milliseconds
+    parameters: Optional[Parameters] = None
     
-    def encode(self) -> bytes:
-        payload = VarInt.encode(self.request_id)
-        if self.expires is not None:
-            payload += VarInt.encode(self.expires)
+    def encode(self, include_request_id: bool = True) -> bytes:
+        payload = b""
+        if include_request_id:
+            payload += VarInt.encode(self.request_id)
+        payload += (self.parameters or Parameters()).encode()
         return VarInt.encode(MessageType.REQUEST_OK) + encode_bytes(payload)
     
     @staticmethod
-    def decode(data: bytes, offset: int = 0) -> Tuple['RequestOkMessage', int]:
-        request_id, consumed = VarInt.decode(data, offset)
-        # Check if expires field exists
-        if offset + consumed < len(data):
-            expires, consumed2 = VarInt.decode(data, offset + consumed)
-            return RequestOkMessage(request_id, expires), consumed + consumed2
-        return RequestOkMessage(request_id), consumed
+    def decode(
+        data: bytes,
+        offset: int = 0,
+        request_id: Optional[int] = None,
+    ) -> Tuple['RequestOkMessage', int]:
+        start_offset = offset
+        if request_id is None:
+            request_id, consumed = VarInt.decode(data, offset)
+            offset += consumed
+
+        parameters = Parameters()
+        if offset < len(data):
+            parameters, consumed = Parameters.decode(data, offset)
+            offset += consumed
+        return RequestOkMessage(request_id, parameters), offset - start_offset
 
 
 @dataclass
@@ -157,19 +272,39 @@ class RequestErrorMessage:
     request_id: int
     error_code: int
     reason: str
+    retry_interval: int = 0
     
-    def encode(self) -> bytes:
-        payload = VarInt.encode(self.request_id)
+    def encode(self, include_request_id: bool = True) -> bytes:
+        payload = b""
+        if include_request_id:
+            payload += VarInt.encode(self.request_id)
         payload += VarInt.encode(self.error_code)
+        payload += VarInt.encode(self.retry_interval)
         payload += ReasonPhrase(self.reason).encode()
         return VarInt.encode(MessageType.REQUEST_ERROR) + encode_bytes(payload)
     
     @staticmethod
-    def decode(data: bytes, offset: int = 0) -> Tuple['RequestErrorMessage', int]:
-        request_id, consumed1 = VarInt.decode(data, offset)
-        error_code, consumed2 = VarInt.decode(data, offset + consumed1)
-        reason, consumed3 = ReasonPhrase.decode(data, offset + consumed1 + consumed2)
-        return RequestErrorMessage(request_id, error_code, reason.text), consumed1 + consumed2 + consumed3
+    def decode(
+        data: bytes,
+        offset: int = 0,
+        request_id: Optional[int] = None,
+    ) -> Tuple['RequestErrorMessage', int]:
+        start_offset = offset
+        if request_id is None:
+            request_id, consumed = VarInt.decode(data, offset)
+            offset += consumed
+        error_code, consumed = VarInt.decode(data, offset)
+        offset += consumed
+        retry_interval, consumed = VarInt.decode(data, offset)
+        offset += consumed
+        reason, consumed = ReasonPhrase.decode(data, offset)
+        offset += consumed
+        return RequestErrorMessage(
+            request_id,
+            error_code,
+            reason.text,
+            retry_interval,
+        ), offset - start_offset
 
 
 # Subscribe messages
@@ -177,11 +312,11 @@ class RequestErrorMessage:
 class SubscribeMessage:
     """SUBSCRIBE message."""
     request_id: int
-    track_alias: int
     full_track_name: FullTrackName
     subscriber_priority: int
     group_order: GroupOrder
     filter_type: SubscribeFilter
+    required_request_id_delta: int = 0
     start_group: Optional[int] = None
     start_object: Optional[int] = None
     end_group: Optional[int] = None
@@ -190,7 +325,7 @@ class SubscribeMessage:
     
     def encode(self) -> bytes:
         payload = VarInt.encode(self.request_id)
-        payload += VarInt.encode(self.track_alias)
+        payload += VarInt.encode(self.required_request_id_delta)
         payload += self.full_track_name.encode()
         payload += bytes([self.subscriber_priority])
         payload += bytes([self.group_order])
@@ -208,8 +343,7 @@ class SubscribeMessage:
             payload += VarInt.encode(self.end_group)
             payload += VarInt.encode(self.end_object)
         
-        if self.parameters:
-            payload += self.parameters.encode()
+        payload += (self.parameters or Parameters()).encode()
         
         return VarInt.encode(MessageType.SUBSCRIBE) + encode_bytes(payload)
     
@@ -218,10 +352,9 @@ class SubscribeMessage:
         start_offset = offset
         request_id, consumed = VarInt.decode(data, offset)
         offset += consumed
-        
-        track_alias, consumed = VarInt.decode(data, offset)
+        required_request_id_delta, consumed = VarInt.decode(data, offset)
         offset += consumed
-        
+
         full_track_name, consumed = FullTrackName.decode(data, offset)
         offset += consumed
         
@@ -252,14 +385,14 @@ class SubscribeMessage:
             end_object, consumed = VarInt.decode(data, offset)
             offset += consumed
         
-        parameters = None
+        parameters = Parameters()
         if offset < len(data):
             parameters, consumed = Parameters.decode(data, offset)
             offset += consumed
-        
+
         msg = SubscribeMessage(
             request_id=request_id,
-            track_alias=track_alias,
+            required_request_id_delta=required_request_id_delta,
             full_track_name=full_track_name,
             subscriber_priority=subscriber_priority,
             group_order=group_order,
@@ -277,66 +410,49 @@ class SubscribeMessage:
 class SubscribeOkMessage:
     """SUBSCRIBE_OK message."""
     request_id: int
-    expires: int  # milliseconds, 0 = does not expire
-    group_order: GroupOrder
-    largest_group: Optional[int] = None
-    largest_object: Optional[int] = None
+    track_alias: int
     parameters: Optional[Parameters] = None
+    track_properties: bytes = b""
     
-    def encode(self) -> bytes:
-        payload = VarInt.encode(self.request_id)
-        payload += VarInt.encode(self.expires)
-        payload += bytes([self.group_order])
-        
-        if self.largest_group is not None:
-            payload += VarInt.encode(self.largest_group)
-            if self.largest_object is not None:
-                payload += VarInt.encode(self.largest_object)
-        
+    def encode(self, include_request_id: bool = True) -> bytes:
+        payload = b""
+        if include_request_id:
+            payload += VarInt.encode(self.request_id)
+        payload += VarInt.encode(self.track_alias)
         if self.parameters:
             payload += self.parameters.encode()
+        else:
+            payload += Parameters().encode()
+        payload += self.track_properties
         
         return VarInt.encode(MessageType.SUBSCRIBE_OK) + encode_bytes(payload)
     
     @staticmethod
-    def decode(data: bytes, offset: int = 0) -> Tuple['SubscribeOkMessage', int]:
+    def decode(
+        data: bytes,
+        offset: int = 0,
+        request_id: Optional[int] = None,
+    ) -> Tuple['SubscribeOkMessage', int]:
         start_offset = offset
-        request_id, consumed = VarInt.decode(data, offset)
+        if request_id is None:
+            request_id, consumed = VarInt.decode(data, offset)
+            offset += consumed
+
+        track_alias, consumed = VarInt.decode(data, offset)
         offset += consumed
-        
-        expires, consumed = VarInt.decode(data, offset)
-        offset += consumed
-        
-        group_order = GroupOrder(data[offset])
-        offset += 1
-        
-        largest_group = None
-        largest_object = None
-        
+
+        parameters = Parameters()
         if offset < len(data):
-            try:
-                largest_group, consumed = VarInt.decode(data, offset)
-                offset += consumed
-                largest_object, consumed = VarInt.decode(data, offset)
-                offset += consumed
-            except:
-                pass
-        
-        parameters = None
-        if offset < len(data):
-            try:
-                parameters, consumed = Parameters.decode(data, offset)
-                offset += consumed
-            except:
-                pass
+            parameters, consumed = Parameters.decode(data, offset)
+            offset += consumed
+        track_properties = data[offset:]
+        offset = len(data)
         
         return SubscribeOkMessage(
             request_id=request_id,
-            expires=expires,
-            group_order=group_order,
-            largest_group=largest_group,
-            largest_object=largest_object,
-            parameters=parameters
+            track_alias=track_alias,
+            parameters=parameters,
+            track_properties=track_properties,
         ), offset - start_offset
 
 
@@ -345,16 +461,19 @@ class SubscribeOkMessage:
 class PublishMessage:
     """PUBLISH message."""
     request_id: int
-    track_alias: int
+    required_request_id_delta: int
     full_track_name: FullTrackName
+    track_alias: int
     parameters: Optional[Parameters] = None
+    track_properties: bytes = b""
     
     def encode(self) -> bytes:
         payload = VarInt.encode(self.request_id)
-        payload += VarInt.encode(self.track_alias)
+        payload += VarInt.encode(self.required_request_id_delta)
         payload += self.full_track_name.encode()
-        if self.parameters:
-            payload += self.parameters.encode()
+        payload += VarInt.encode(self.track_alias)
+        payload += (self.parameters or Parameters()).encode()
+        payload += self.track_properties
         return VarInt.encode(MessageType.PUBLISH) + encode_bytes(payload)
     
     @staticmethod
@@ -362,34 +481,91 @@ class PublishMessage:
         start_offset = offset
         request_id, consumed = VarInt.decode(data, offset)
         offset += consumed
-        
-        track_alias, consumed = VarInt.decode(data, offset)
+        required_request_id_delta, consumed = VarInt.decode(data, offset)
         offset += consumed
         
         full_track_name, consumed = FullTrackName.decode(data, offset)
         offset += consumed
+
+        track_alias, consumed = VarInt.decode(data, offset)
+        offset += consumed
         
-        parameters = None
+        parameters = Parameters()
         if offset < len(data):
             parameters, consumed = Parameters.decode(data, offset)
             offset += consumed
+        track_properties = data[offset:]
+        offset = len(data)
         
-        return PublishMessage(request_id, track_alias, full_track_name, parameters), offset - start_offset
+        return PublishMessage(
+            request_id=request_id,
+            required_request_id_delta=required_request_id_delta,
+            full_track_name=full_track_name,
+            track_alias=track_alias,
+            parameters=parameters,
+            track_properties=track_properties,
+        ), offset - start_offset
+
+
+@dataclass
+class RequestUpdateMessage:
+    """REQUEST_UPDATE message."""
+    request_id: int
+    required_request_id_delta: int = 0
+    parameters: Optional[Parameters] = None
+
+    def encode(self) -> bytes:
+        payload = VarInt.encode(self.request_id)
+        payload += VarInt.encode(self.required_request_id_delta)
+        payload += (self.parameters or Parameters()).encode()
+        return VarInt.encode(MessageType.REQUEST_UPDATE) + encode_bytes(payload)
+
+    @staticmethod
+    def decode(data: bytes, offset: int = 0) -> Tuple['RequestUpdateMessage', int]:
+        start_offset = offset
+        request_id, consumed = VarInt.decode(data, offset)
+        offset += consumed
+        required_request_id_delta, consumed = VarInt.decode(data, offset)
+        offset += consumed
+        parameters = Parameters()
+        if offset < len(data):
+            parameters, consumed = Parameters.decode(data, offset)
+            offset += consumed
+        return RequestUpdateMessage(
+            request_id=request_id,
+            required_request_id_delta=required_request_id_delta,
+            parameters=parameters,
+        ), offset - start_offset
 
 
 @dataclass
 class PublishOkMessage:
     """PUBLISH_OK message."""
     request_id: int
+    parameters: Optional[Parameters] = None
     
-    def encode(self) -> bytes:
-        payload = VarInt.encode(self.request_id)
+    def encode(self, include_request_id: bool = True) -> bytes:
+        payload = b""
+        if include_request_id:
+            payload += VarInt.encode(self.request_id)
+        payload += (self.parameters or Parameters()).encode()
         return VarInt.encode(MessageType.PUBLISH_OK) + encode_bytes(payload)
     
     @staticmethod
-    def decode(data: bytes, offset: int = 0) -> Tuple['PublishOkMessage', int]:
-        request_id, consumed = VarInt.decode(data, offset)
-        return PublishOkMessage(request_id), consumed
+    def decode(
+        data: bytes,
+        offset: int = 0,
+        request_id: Optional[int] = None,
+    ) -> Tuple['PublishOkMessage', int]:
+        start_offset = offset
+        if request_id is None:
+            request_id, consumed = VarInt.decode(data, offset)
+            offset += consumed
+        parameters = Parameters()
+        if offset < len(data):
+            parameters, consumed = Parameters.decode(data, offset)
+            offset += consumed
+        return PublishOkMessage(request_id, parameters), offset - start_offset
 
 
 @dataclass
@@ -397,20 +573,40 @@ class PublishDoneMessage:
     """PUBLISH_DONE message."""
     request_id: int
     status_code: int
-    reason: str
+    stream_count: int = UNKNOWN_PUBLISH_DONE_STREAM_COUNT
+    reason: str = ""
     
-    def encode(self) -> bytes:
-        payload = VarInt.encode(self.request_id)
+    def encode(self, include_request_id: bool = True) -> bytes:
+        payload = b""
+        if include_request_id:
+            payload += VarInt.encode(self.request_id)
         payload += VarInt.encode(self.status_code)
+        payload += VarInt.encode(self.stream_count)
         payload += ReasonPhrase(self.reason).encode()
         return VarInt.encode(MessageType.PUBLISH_DONE) + encode_bytes(payload)
     
     @staticmethod
-    def decode(data: bytes, offset: int = 0) -> Tuple['PublishDoneMessage', int]:
-        request_id, consumed1 = VarInt.decode(data, offset)
-        status_code, consumed2 = VarInt.decode(data, offset + consumed1)
-        reason, consumed3 = ReasonPhrase.decode(data, offset + consumed1 + consumed2)
-        return PublishDoneMessage(request_id, status_code, reason.text), consumed1 + consumed2 + consumed3
+    def decode(
+        data: bytes,
+        offset: int = 0,
+        request_id: Optional[int] = None,
+    ) -> Tuple['PublishDoneMessage', int]:
+        start_offset = offset
+        if request_id is None:
+            request_id, consumed = VarInt.decode(data, offset)
+            offset += consumed
+        status_code, consumed = VarInt.decode(data, offset)
+        offset += consumed
+        stream_count, consumed = VarInt.decode(data, offset)
+        offset += consumed
+        reason, consumed = ReasonPhrase.decode(data, offset)
+        offset += consumed
+        return PublishDoneMessage(
+            request_id=request_id,
+            status_code=status_code,
+            stream_count=stream_count,
+            reason=reason.text,
+        ), offset - start_offset
 
 
 # Fetch messages
@@ -425,6 +621,7 @@ class FetchMessage:
     full_track_name: FullTrackName
     subscriber_priority: int = 128
     group_order: GroupOrder = GroupOrder.ASCENDING
+    required_request_id_delta: int = 0
     start_group: int = 0
     start_object: int = 0
     end_group: Optional[int] = None
@@ -433,6 +630,7 @@ class FetchMessage:
     
     def encode(self) -> bytes:
         payload = VarInt.encode(self.request_id)
+        payload += VarInt.encode(self.required_request_id_delta)
         payload += self.full_track_name.encode()
         payload += bytes([self.subscriber_priority])
         payload += bytes([self.group_order])
@@ -440,14 +638,15 @@ class FetchMessage:
         payload += VarInt.encode(self.start_object if self.start_object is not None else 0)
         payload += VarInt.encode(self.end_group if self.end_group is not None else 0xFFFFFFFFFFFFFFFF)
         payload += VarInt.encode(self.end_object if self.end_object is not None else 0xFFFFFFFFFFFFFFFF)
-        if self.parameters:
-            payload += self.parameters.encode()
+        payload += (self.parameters or Parameters()).encode()
         return VarInt.encode(MessageType.FETCH) + encode_bytes(payload)
     
     @staticmethod
     def decode(data: bytes, offset: int = 0) -> Tuple['FetchMessage', int]:
         start_offset = offset
         request_id, consumed = VarInt.decode(data, offset)
+        offset += consumed
+        required_request_id_delta, consumed = VarInt.decode(data, offset)
         offset += consumed
         
         full_track_name, consumed = FullTrackName.decode(data, offset)
@@ -477,13 +676,14 @@ class FetchMessage:
         if end_object == 0xFFFFFFFFFFFFFFFF:
             end_object = None
         
-        parameters = None
+        parameters = Parameters()
         if offset < len(data):
             parameters, consumed = Parameters.decode(data, offset)
             offset += consumed
         
         return FetchMessage(
             request_id=request_id,
+            required_request_id_delta=required_request_id_delta,
             full_track_name=full_track_name,
             subscriber_priority=subscriber_priority,
             group_order=group_order,
@@ -499,51 +699,59 @@ class FetchMessage:
 class FetchOkMessage:
     """FETCH_OK message."""
     request_id: int
-    group_order: GroupOrder
     end_of_track: bool
-    largest_group: Optional[int] = None
-    largest_object: Optional[int] = None
+    end_location: Location
+    parameters: Optional[Parameters] = None
+    track_properties: bytes = b""
     
-    def encode(self) -> bytes:
-        payload = VarInt.encode(self.request_id)
-        payload += bytes([self.group_order])
+    def encode(self, include_request_id: bool = True) -> bytes:
+        payload = b""
+        if include_request_id:
+            payload += VarInt.encode(self.request_id)
         payload += bytes([1 if self.end_of_track else 0])
-        if self.largest_group is not None and self.largest_object is not None:
-            payload += VarInt.encode(self.largest_group)
-            payload += VarInt.encode(self.largest_object)
+        payload += self.end_location.encode()
+        payload += (self.parameters or Parameters()).encode()
+        payload += self.track_properties
         return VarInt.encode(MessageType.FETCH_OK) + encode_bytes(payload)
     
     @staticmethod
-    def decode(data: bytes, offset: int = 0) -> Tuple['FetchOkMessage', int]:
+    def decode(
+        data: bytes,
+        offset: int = 0,
+        request_id: Optional[int] = None,
+    ) -> Tuple['FetchOkMessage', int]:
         start_offset = offset
-        request_id, consumed = VarInt.decode(data, offset)
-        offset += consumed
-        
-        group_order = GroupOrder(data[offset])
-        offset += 1
-        
+        if request_id is None:
+            request_id, consumed = VarInt.decode(data, offset)
+            offset += consumed
+
         end_of_track = data[offset] != 0
         offset += 1
-        
-        largest_group = None
-        largest_object = None
-        
+
+        end_location, consumed = Location.decode(data, offset)
+        offset += consumed
+
+        parameters = Parameters()
         if offset < len(data):
-            largest_group, consumed = VarInt.decode(data, offset)
+            parameters, consumed = Parameters.decode(data, offset)
             offset += consumed
-            largest_object, consumed = VarInt.decode(data, offset)
-            offset += consumed
-        
+        track_properties = data[offset:]
+        offset = len(data)
+
         return FetchOkMessage(
             request_id=request_id,
-            group_order=group_order,
             end_of_track=end_of_track,
-            largest_group=largest_group,
-            largest_object=largest_object
+            end_location=end_location,
+            parameters=parameters,
+            track_properties=track_properties,
         ), offset - start_offset
 
 
-def decode_control_message(data: bytes, offset: int = 0) -> Tuple[object, int]:
+def decode_control_message(
+    data: bytes,
+    offset: int = 0,
+    response_request_id: Optional[int] = None,
+) -> Tuple[object, int]:
     """
     Decode any control message from bytes.
     
@@ -558,23 +766,25 @@ def decode_control_message(data: bytes, offset: int = 0) -> Tuple[object, int]:
     elif msg_type == MessageType.GOAWAY:
         msg, consumed = GoAwayMessage.decode(msg_data)
     elif msg_type == MessageType.REQUEST_OK:
-        msg, consumed = RequestOkMessage.decode(msg_data)
+        msg, consumed = RequestOkMessage.decode(msg_data, request_id=response_request_id)
     elif msg_type == MessageType.REQUEST_ERROR:
-        msg, consumed = RequestErrorMessage.decode(msg_data)
+        msg, consumed = RequestErrorMessage.decode(msg_data, request_id=response_request_id)
     elif msg_type == MessageType.SUBSCRIBE:
         msg, consumed = SubscribeMessage.decode(msg_data)
     elif msg_type == MessageType.SUBSCRIBE_OK:
-        msg, consumed = SubscribeOkMessage.decode(msg_data)
+        msg, consumed = SubscribeOkMessage.decode(msg_data, request_id=response_request_id)
+    elif msg_type == MessageType.REQUEST_UPDATE:
+        msg, consumed = RequestUpdateMessage.decode(msg_data)
     elif msg_type == MessageType.PUBLISH:
         msg, consumed = PublishMessage.decode(msg_data)
     elif msg_type == MessageType.PUBLISH_OK:
-        msg, consumed = PublishOkMessage.decode(msg_data)
+        msg, consumed = PublishOkMessage.decode(msg_data, request_id=response_request_id)
     elif msg_type == MessageType.PUBLISH_DONE:
-        msg, consumed = PublishDoneMessage.decode(msg_data)
+        msg, consumed = PublishDoneMessage.decode(msg_data, request_id=response_request_id)
     elif msg_type == MessageType.FETCH:
         msg, consumed = FetchMessage.decode(msg_data)
     elif msg_type == MessageType.FETCH_OK:
-        msg, consumed = FetchOkMessage.decode(msg_data)
+        msg, consumed = FetchOkMessage.decode(msg_data, request_id=response_request_id)
     else:
         raise ValueError(f"Unknown message type: {msg_type}")
     

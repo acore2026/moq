@@ -8,7 +8,9 @@ from .quic_transport import (
     QUICServer,
     MOQQuicProtocol,
     StreamData,
+    StreamResetData,
     DatagramData,
+    is_unidirectional_stream_id,
     is_quic_available
 )
 from .webtransport import (
@@ -25,7 +27,9 @@ __all__ = [
     'QUICServer',
     'MOQQuicProtocol',
     'StreamData',
+    'StreamResetData',
     'DatagramData',
+    'is_unidirectional_stream_id',
     'is_quic_available',
     'WebTransportClient',
     'WebTransportServer',

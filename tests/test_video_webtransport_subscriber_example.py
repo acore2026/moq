@@ -19,14 +19,17 @@ from examples.video_webtransport_subscriber_example import (
     WT_MAX_SESSIONS,
     build_browser_metadata,
     build_player_page,
+    find_listener_pids,
     generate_webtransport_certificate,
     infer_avc1_codec_from_init_segment,
+    release_listener_port,
+    address_in_use_error,
 )
 
 
 @pytest.mark.asyncio
 async def test_browser_page_server_falls_back_when_port_is_in_use(monkeypatch):
-    preferred_port = 8080
+    preferred_port = 9004
     fallback_port = 18080
     fake_server = AsyncMock()
     fake_server.close = Mock()
@@ -39,6 +42,11 @@ async def test_browser_page_server_falls_back_when_port_is_in_use(monkeypatch):
         ]
     )
     monkeypatch.setattr("examples.video_webtransport_subscriber_example.asyncio.start_server", start_server)
+    stop_listener_processes = Mock(return_value=[])
+    monkeypatch.setattr(
+        "examples.video_webtransport_subscriber_example.stop_listener_processes",
+        stop_listener_processes,
+    )
 
     page_server = BrowserPageServer(b"<html></html>", port=preferred_port)
 
@@ -50,6 +58,125 @@ async def test_browser_page_server_falls_back_when_port_is_in_use(monkeypatch):
     await page_server.stop()
     fake_server.close.assert_called_once()
     fake_server.wait_closed.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_browser_page_server_retries_preferred_port_after_stopping_existing_listener(monkeypatch):
+    preferred_port = 9004
+    fake_server = AsyncMock()
+    fake_server.close = Mock()
+    fake_server.sockets = [SimpleNamespace(getsockname=lambda: ("127.0.0.1", preferred_port))]
+
+    start_server = AsyncMock(
+        side_effect=[
+            OSError(errno.EADDRINUSE, "address already in use"),
+            fake_server,
+        ]
+    )
+    monkeypatch.setattr("examples.video_webtransport_subscriber_example.asyncio.start_server", start_server)
+    stop_listener_processes = Mock(side_effect=[[], [43210]])
+    monkeypatch.setattr(
+        "examples.video_webtransport_subscriber_example.stop_listener_processes",
+        stop_listener_processes,
+    )
+    monkeypatch.setattr("examples.video_webtransport_subscriber_example.asyncio.sleep", AsyncMock())
+
+    page_server = BrowserPageServer(b"<html></html>", port=preferred_port, fallback_to_ephemeral=False)
+
+    await page_server.start()
+    assert page_server.port == preferred_port
+    assert start_server.await_args_list[0].args[1:] == ("127.0.0.1", preferred_port)
+    assert start_server.await_args_list[1].args[1:] == ("127.0.0.1", preferred_port)
+
+    await page_server.stop()
+    fake_server.close.assert_called_once()
+    fake_server.wait_closed.assert_awaited_once()
+
+
+def test_find_listener_pids_parses_ss_output(monkeypatch):
+    tcp_completed = SimpleNamespace(
+        returncode=0,
+        stdout='LISTEN 0 100 127.0.0.1:9004 0.0.0.0:* users:(("python3",pid=1234,fd=5))\n',
+    )
+    udp_completed = SimpleNamespace(
+        returncode=0,
+        stdout='UNCONN 0 0 127.0.0.1:9004 0.0.0.0:* users:(("python3",pid=5678,fd=7))\n',
+    )
+    run = Mock(side_effect=[tcp_completed, udp_completed])
+    monkeypatch.setattr("examples.video_webtransport_subscriber_example.platform.system", lambda: "Linux")
+    monkeypatch.setattr("examples.video_webtransport_subscriber_example.shutil.which", lambda name: "/usr/bin/ss")
+    monkeypatch.setattr(
+        "examples.video_webtransport_subscriber_example.subprocess.run",
+        run,
+    )
+
+    assert find_listener_pids(9004) == {1234, 5678}
+    assert run.call_args_list[0].args[0] == ["ss", "-ltnp", "sport = :9004"]
+    assert run.call_args_list[1].args[0] == ["ss", "-lunp", "sport = :9004"]
+
+
+def test_address_in_use_error_includes_exact_listener_address():
+    error = address_in_use_error(
+        "WebTransport bridge",
+        "127.0.0.1",
+        4433,
+        OSError(errno.EADDRINUSE, "address already in use"),
+    )
+
+    assert error.errno == errno.EADDRINUSE
+    assert "WebTransport bridge address already in use: 127.0.0.1:4433" in str(error)
+
+
+@pytest.mark.asyncio
+async def test_release_listener_port_waits_after_stopping_existing_listener(monkeypatch):
+    stop_listener_processes = Mock(return_value=[43210])
+    find_pids = Mock(return_value=[])
+    sleep = AsyncMock()
+    monkeypatch.setattr(
+        "examples.video_webtransport_subscriber_example.stop_listener_processes",
+        stop_listener_processes,
+    )
+    monkeypatch.setattr("examples.video_webtransport_subscriber_example.find_listener_pids", find_pids)
+    monkeypatch.setattr("examples.video_webtransport_subscriber_example.asyncio.sleep", sleep)
+
+    assert await release_listener_port(4433, "WebTransport bridge port") is True
+    stop_listener_processes.assert_called_once_with(4433)
+    find_pids.assert_called_once_with(4433)
+    sleep.assert_awaited_once_with(0.2)
+
+
+@pytest.mark.asyncio
+async def test_release_listener_port_returns_false_when_no_listener_was_stopped(monkeypatch):
+    stop_listener_processes = Mock(return_value=[])
+    sleep = AsyncMock()
+    monkeypatch.setattr(
+        "examples.video_webtransport_subscriber_example.stop_listener_processes",
+        stop_listener_processes,
+    )
+    monkeypatch.setattr("examples.video_webtransport_subscriber_example.asyncio.sleep", sleep)
+
+    assert await release_listener_port(4433, "WebTransport bridge port") is False
+    stop_listener_processes.assert_called_once_with(4433)
+    sleep.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_release_listener_port_force_stops_stubborn_listener(monkeypatch):
+    stop_listener_processes = Mock(return_value=[43210])
+    find_pids = Mock(return_value={43210})
+    sleep = AsyncMock()
+    kill = Mock()
+    monkeypatch.setattr(
+        "examples.video_webtransport_subscriber_example.stop_listener_processes",
+        stop_listener_processes,
+    )
+    monkeypatch.setattr("examples.video_webtransport_subscriber_example.find_listener_pids", find_pids)
+    monkeypatch.setattr("examples.video_webtransport_subscriber_example.asyncio.sleep", sleep)
+    monkeypatch.setattr("examples.video_webtransport_subscriber_example.os.kill", kill)
+
+    assert await release_listener_port(9004, "Browser page port") is True
+    kill.assert_called_once()
+    assert kill.call_args.args[0] == 43210
 
 
 def test_browser_h3_connection_advertises_current_webtransport_setting():
@@ -92,6 +219,17 @@ def test_build_player_page_uses_explicit_webtransport_host():
     assert "if (state.mediaSource) {" in page
     assert 'logLine("segment received before metadata; queued")' in page
     assert "flushPendingSegments();" in page
+    assert "function syncPlaybackPosition(reason)" in page
+    assert "rangeEnd - 2.0" in page
+    assert "bufferAhead >= 0.75" in page
+    assert 'logLine(`seeked to buffered range (${reason}): ${liveEdge.toFixed(3)}s`)' in page
+    assert 'logLine(`appendBuffer failed: ${error.message}`)' in page
+    assert 'logLine(`addSourceBuffer failed: ${error.message}`)' in page
+    assert 'logLine("video playing")' in page
+    assert 'logLine(`video error (${detail})`)' in page
+    assert 'document.addEventListener("visibilitychange"' in page
+    assert 'requestPlayback("visibilitychange")' in page
+    assert 'elements.video.addEventListener("click"' in page
     assert 'window.addEventListener("pagehide"' in page
     assert 'window.addEventListener("beforeunload"' in page
     assert 'closeActiveTransport("pagehide")' in page
@@ -139,3 +277,21 @@ def test_generate_webtransport_certificate_uses_browser_compatible_ecdsa_cert():
         assert len(cert_hash_hex) == 64
     finally:
         temp_dir.cleanup()
+
+
+def test_generate_webtransport_certificate_reuses_cached_certificate(monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        "examples.video_webtransport_subscriber_example.WEBTRANSPORT_CERT_CACHE_ROOT",
+        str(tmp_path),
+    )
+
+    first_cert_path, first_key_path, first_hash, first_dir = generate_webtransport_certificate("127.0.0.1")
+    second_cert_path, second_key_path, second_hash, second_dir = generate_webtransport_certificate("127.0.0.1")
+    try:
+        assert second_cert_path == first_cert_path
+        assert second_key_path == first_key_path
+        assert second_hash == first_hash
+        assert first_dir.name == second_dir.name
+    finally:
+        first_dir.cleanup()
+        second_dir.cleanup()

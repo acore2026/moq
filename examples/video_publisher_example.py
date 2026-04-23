@@ -41,6 +41,8 @@ TRACK_NAME = FullTrackName([b"video"], b"h264-live")
 FRAME_WIDTH = 1280
 FRAME_HEIGHT = 720
 FRAME_RATE = 30
+KEYFRAME_INTERVAL_SECONDS = 0.5
+KEYFRAME_INTERVAL_FRAMES = max(1, round(FRAME_RATE * KEYFRAME_INTERVAL_SECONDS))
 CHUNK_SIZE = 512 * 1024
 VIDEO_BITRATE = "2M"
 SUBSCRIBER_GRACE_PERIOD = 1.0
@@ -176,9 +178,9 @@ def build_ffmpeg_command(include_timestamp: bool = True) -> list[str]:
         "-pix_fmt",
         "yuv420p",
         "-g",
-        str(FRAME_RATE),
+        str(KEYFRAME_INTERVAL_FRAMES),
         "-keyint_min",
-        str(FRAME_RATE),
+        str(KEYFRAME_INTERVAL_FRAMES),
         "-sc_threshold",
         "0",
         "-b:v",

@@ -6,7 +6,7 @@ import asyncio
 import ipaddress
 import logging
 import tempfile
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Callable, Dict, Optional
 
 from .quic_transport import (
@@ -21,6 +21,7 @@ from .quic_transport import (
     _OrderedCallbackDispatcher,
     DatagramData,
     StreamData,
+    StreamResetData,
 )
 from .webtransport import WEBTRANSPORT_DRAFT_HEADER, WebTransportSessionConnection
 
@@ -37,6 +38,7 @@ if AIOQUIC_AVAILABLE:
         ProtocolNegotiated,
         QuicEvent,
         StreamDataReceived,
+        StopSendingReceived,
         StreamReset,
     )
 
@@ -56,6 +58,7 @@ class MOQCombinedServerProtocol(_KeepAliveProtocolMixin, QuicConnectionProtocol)
         session_path: str,
         on_client_connect: Optional[Callable] = None,
         on_stream_data: Optional[Callable] = None,
+        on_stream_reset: Optional[Callable] = None,
         on_datagram: Optional[Callable] = None,
         on_client_disconnect: Optional[Callable] = None,
         **kwargs,
@@ -64,12 +67,14 @@ class MOQCombinedServerProtocol(_KeepAliveProtocolMixin, QuicConnectionProtocol)
         self._session_path = session_path
         self._on_client_connect = on_client_connect
         self._on_stream_data = on_stream_data
+        self._on_stream_reset = on_stream_reset
         self._on_datagram = on_datagram
         self._on_client_disconnect = on_client_disconnect
         self._mode: Optional[str] = None
         self._http: Optional[H3Connection] = None
         self._stream_buffers: Dict[int, bytes] = {}
         self._wt_sessions: Dict[int, WebTransportSessionConnection] = {}
+        self._wt_stream_sessions: Dict[int, WebTransportSessionConnection] = {}
         self._dispatcher = _OrderedCallbackDispatcher(logger)
         self._init_keepalive(logger, interval=DEFAULT_QUIC_KEEPALIVE_INTERVAL)
 
@@ -115,6 +120,25 @@ class MOQCombinedServerProtocol(_KeepAliveProtocolMixin, QuicConnectionProtocol)
                 self._stream_buffers.pop(event.stream_id, None)
         elif isinstance(event, StreamReset):
             self._stream_buffers.pop(event.stream_id, None)
+            self._dispatcher.enqueue(
+                self._on_stream_reset,
+                self,
+                StreamResetData(
+                    stream_id=event.stream_id,
+                    error_code=event.error_code,
+                    event_type="reset",
+                ),
+            )
+        elif isinstance(event, StopSendingReceived):
+            self._dispatcher.enqueue(
+                self._on_stream_reset,
+                self,
+                StreamResetData(
+                    stream_id=event.stream_id,
+                    error_code=event.error_code,
+                    event_type="stop_sending",
+                ),
+            )
         elif isinstance(event, DatagramFrameReceived):
             self._dispatcher.enqueue(self._on_datagram, self, DatagramData(data=event.data))
         elif isinstance(event, ConnectionTerminated):
@@ -135,7 +159,21 @@ class MOQCombinedServerProtocol(_KeepAliveProtocolMixin, QuicConnectionProtocol)
                     event.reason_phrase,
                 )
             self._wt_sessions.clear()
+            self._wt_stream_sessions.clear()
             return
+
+        if isinstance(event, (StreamReset, StopSendingReceived)):
+            session = self._wt_stream_sessions.get(event.stream_id)
+            if session is not None:
+                self._dispatcher.enqueue(
+                    self._on_stream_reset,
+                    session,
+                    StreamResetData(
+                        stream_id=event.stream_id,
+                        error_code=event.error_code,
+                        event_type="reset" if isinstance(event, StreamReset) else "stop_sending",
+                    ),
+                )
 
         if self._http is None:
             return
@@ -153,6 +191,7 @@ class MOQCombinedServerProtocol(_KeepAliveProtocolMixin, QuicConnectionProtocol)
         elif isinstance(event, WebTransportStreamDataReceived):
             session = self._wt_sessions.get(event.session_id)
             if session:
+                self._wt_stream_sessions[event.stream_id] = session
                 self._dispatcher.enqueue(
                     self._on_stream_data,
                     session,
@@ -227,6 +266,7 @@ class CombinedTransportServer:
         self._server = None
         self._on_client_connect: Optional[Callable] = None
         self._on_stream_data: Optional[Callable] = None
+        self._on_stream_reset: Optional[Callable] = None
         self._on_datagram: Optional[Callable] = None
         self._on_client_disconnect: Optional[Callable] = None
 
@@ -248,11 +288,13 @@ class CombinedTransportServer:
         self,
         on_client_connect: Optional[Callable] = None,
         on_stream_data: Optional[Callable] = None,
+        on_stream_reset: Optional[Callable] = None,
         on_datagram: Optional[Callable] = None,
         on_client_disconnect: Optional[Callable] = None,
     ) -> None:
         self._on_client_connect = on_client_connect
         self._on_stream_data = on_stream_data
+        self._on_stream_reset = on_stream_reset
         self._on_datagram = on_datagram
         self._on_client_disconnect = on_client_disconnect
 
@@ -262,6 +304,7 @@ class CombinedTransportServer:
             session_path=self.path,
             on_client_connect=self._on_client_connect,
             on_stream_data=self._on_stream_data,
+            on_stream_reset=self._on_stream_reset,
             on_datagram=self._on_datagram,
             on_client_disconnect=self._on_client_disconnect,
             **kwargs,
@@ -295,8 +338,8 @@ class CombinedTransportServer:
             .issuer_name(issuer)
             .public_key(key.public_key())
             .serial_number(x509.random_serial_number())
-            .not_valid_before(datetime.utcnow() - timedelta(minutes=1))
-            .not_valid_after(datetime.utcnow() + timedelta(days=30))
+            .not_valid_before(datetime.now(timezone.utc) - timedelta(minutes=1))
+            .not_valid_after(datetime.now(timezone.utc) + timedelta(days=30))
             .add_extension(x509.SubjectAlternativeName(san_values), critical=False)
             .sign(key, hashes.SHA256())
         )
