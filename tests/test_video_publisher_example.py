@@ -38,6 +38,8 @@ def test_build_ffmpeg_command_uses_shorter_keyframe_interval_for_smoother_live_p
     assert command[g_index + 1] == str(video_publisher_example.KEYFRAME_INTERVAL_FRAMES)
     assert command[keyint_index + 1] == str(video_publisher_example.KEYFRAME_INTERVAL_FRAMES)
     assert video_publisher_example.KEYFRAME_INTERVAL_FRAMES < video_publisher_example.FRAME_RATE
+    assert video_publisher_example.KEYFRAME_INTERVAL_SECONDS == 0.25
+    assert video_publisher_example.VIDEO_BITRATE == "1.5M"
 
 
 def test_fragmented_mp4_muxer_splits_init_and_media_fragments():

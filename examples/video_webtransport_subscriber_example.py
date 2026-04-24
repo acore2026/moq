@@ -40,7 +40,7 @@ setup_logging()
 
 from aioquic.asyncio import QuicConnectionProtocol, serve
 from aioquic.h3.connection import H3_ALPN, H3Connection
-from aioquic.h3.events import DatagramReceived, H3Event, HeadersReceived, WebTransportStreamDataReceived
+from aioquic.h3.events import DataReceived, DatagramReceived, H3Event, HeadersReceived, WebTransportStreamDataReceived
 from aioquic.quic.configuration import QuicConfiguration
 from aioquic.quic.events import ConnectionTerminated, ProtocolNegotiated, QuicEvent
 from cryptography import x509
@@ -62,12 +62,15 @@ WEBTRANSPORT_HOST = "127.0.0.1"
 WEBTRANSPORT_PORT = 4433
 WEBTRANSPORT_PATH = "/wt"
 WEBTRANSPORT_CERT_CACHE_ROOT = os.path.join(tempfile.gettempdir(), "moq-webtransport-browser-certs")
-MAX_REPLAY_FRAGMENTS = 8
+MAX_REPLAY_FRAGMENTS = 3
 DEFAULT_MSE_CODEC = "avc1.64001F"
 DEFAULT_MIME_TYPE = f'video/mp4; codecs="{DEFAULT_MSE_CODEC}"'
 WEBTRANSPORT_CERT_VALIDITY_DAYS = 7
-LIVE_EDGE_DELAY_SECONDS = 2.0
-MIN_BUFFER_AHEAD_SECONDS = 0.75
+LIVE_EDGE_DELAY_SECONDS = 1.2
+MIN_BUFFER_AHEAD_SECONDS = 0.5
+MAX_APPEND_QUEUE_SEGMENTS = 3
+MAX_BUFFER_BACK_SECONDS = 4.0
+MAX_LIVE_LAG_SECONDS = 3.0
 
 # Chrome-family browsers now expect the current WebTransport-over-HTTP/3
 # SETTINGS identifier during session establishment. aioquic still advertises
@@ -477,6 +480,8 @@ HTML_TEMPLATE = """<!doctype html>
         codec: null,
         fragments: 0,
         initSegment: null,
+        lastTrimTime: 0,
+        lastSeekTarget: null,
         mediaSource: null,
         metadata: null,
         pendingSegments: [],
@@ -546,6 +551,67 @@ HTML_TEMPLATE = """<!doctype html>
         }
       }
 
+      function delay(milliseconds) {
+        return new Promise((resolve) => {
+          setTimeout(resolve, milliseconds);
+        });
+      }
+
+      function tunePlaybackRate(bufferAhead) {
+        if (!Number.isFinite(bufferAhead)) {
+          elements.video.playbackRate = 1.0;
+          return;
+        }
+
+        if (bufferAhead > __LIVE_EDGE_DELAY_SECONDS__ + 0.6) {
+          elements.video.playbackRate = 1.04;
+        } else if (bufferAhead > __LIVE_EDGE_DELAY_SECONDS__ + 0.3) {
+          elements.video.playbackRate = 1.02;
+        } else {
+          elements.video.playbackRate = 1.0;
+        }
+      }
+
+      function trimBufferedMedia() {
+        if (!state.sourceBuffer || state.sourceBuffer.updating || !state.mediaSource) {
+          return;
+        }
+        if (state.mediaSource.readyState !== "open") {
+          return;
+        }
+
+        const { buffered } = elements.video;
+        if (!buffered || buffered.length === 0) {
+          return;
+        }
+
+        const now = performance.now();
+        if (now - state.lastTrimTime < 1500) {
+          return;
+        }
+
+        const currentTime = elements.video.currentTime || 0;
+        const trimBefore = currentTime - 1.0;
+        if (!Number.isFinite(trimBefore) || trimBefore <= 0) {
+          return;
+        }
+
+        const firstRangeStart = buffered.start(0);
+        const firstRangeEnd = buffered.end(0);
+        const removeEnd = Math.min(trimBefore, firstRangeEnd);
+        if (removeEnd - firstRangeStart <= 1.0) {
+          return;
+        }
+
+        try {
+          state.lastTrimTime = now;
+          state.sourceBuffer.remove(0, removeEnd);
+          logLine(`trimmed buffered media before ${removeEnd.toFixed(3)}s`);
+        } catch (error) {
+          logLine(`buffer trim skipped: ${error.message}`);
+        }
+      }
+
       function syncPlaybackPosition(reason) {
         const { buffered } = elements.video;
         if (!buffered || buffered.length === 0) {
@@ -559,11 +625,27 @@ HTML_TEMPLATE = """<!doctype html>
         const inRange = currentTime >= rangeStart && currentTime <= rangeEnd;
 
         const bufferAhead = rangeEnd - currentTime;
+        const liveLag = rangeEnd - currentTime;
+        tunePlaybackRate(bufferAhead);
+        if (liveLag > __MAX_LIVE_LAG_SECONDS__) {
+          const liveEdge = Math.max(rangeStart, rangeEnd - __LIVE_EDGE_DELAY_SECONDS__);
+          elements.video.currentTime = liveEdge;
+          elements.video.playbackRate = 1.0;
+          logLine(`forced catch-up seek (${reason}): ${liveEdge.toFixed(3)}s`);
+          return;
+        }
         if (inRange && currentTime !== 0 && bufferAhead >= __MIN_BUFFER_AHEAD_SECONDS__) {
           return;
         }
 
         const liveEdge = Math.max(rangeStart, rangeEnd - __LIVE_EDGE_DELAY_SECONDS__);
+        if (state.lastSeekTarget !== null && Math.abs(liveEdge - state.lastSeekTarget) < 0.25) {
+          return;
+        }
+        if (liveEdge <= currentTime + 0.15) {
+          return;
+        }
+        state.lastSeekTarget = liveEdge;
         elements.video.currentTime = liveEdge;
         logLine(`seeked to buffered range (${reason}): ${liveEdge.toFixed(3)}s`);
       }
@@ -588,9 +670,28 @@ HTML_TEMPLATE = """<!doctype html>
         state.appendQueue = [];
         state.sourceBuffer = null;
         state.mediaSource = null;
+        state.playerGeneration = (state.playerGeneration || 0) + 1;
+        state.lastSeekTarget = null;
         elements.video.removeAttribute("src");
         elements.video.load();
         elements.detailLine.textContent = reason;
+      }
+
+      function invalidatePlayer(reason) {
+        state.appendQueue = [];
+        state.sourceBuffer = null;
+        state.mediaSource = null;
+        state.playerGeneration = (state.playerGeneration || 0) + 1;
+        logLine(`player reset: ${reason}`);
+      }
+
+      function ensureInitSegmentQueued() {
+        if (!state.initSegment) {
+          return;
+        }
+        if (state.appendQueue.length === 0 || state.appendQueue[0] !== state.initSegment) {
+          state.appendQueue.unshift(state.initSegment);
+        }
       }
 
       function applyMetadata(metadata, options = {}) {
@@ -635,14 +736,27 @@ HTML_TEMPLATE = """<!doctype html>
         if (!state.sourceBuffer || state.sourceBuffer.updating || state.appendQueue.length === 0) {
           return;
         }
+        if (!state.mediaSource || state.mediaSource.readyState !== "open") {
+          invalidatePlayer("media source is not open during append");
+          ensureInitSegmentQueued();
+          if (state.metadata) {
+            ensurePlayer(state.metadata);
+          }
+          return;
+        }
         const next = state.appendQueue.shift();
         try {
           state.sourceBuffer.appendBuffer(next);
         } catch (error) {
+          invalidatePlayer(error.message);
+          ensureInitSegmentQueued();
           setConnectionState("append error", "#8e1f0d");
           elements.statusLine.textContent = "SourceBuffer append failed.";
           elements.detailLine.textContent = error.message;
           logLine(`appendBuffer failed: ${error.message}`);
+          if (state.metadata) {
+            ensurePlayer(state.metadata);
+          }
         }
       }
 
@@ -657,12 +771,20 @@ HTML_TEMPLATE = """<!doctype html>
         }
 
         const mediaSource = new MediaSource();
+        const playerGeneration = state.playerGeneration || 0;
         mediaSource.addEventListener("sourceopen", () => {
+          if (state.mediaSource !== mediaSource || playerGeneration !== (state.playerGeneration || 0)) {
+            return;
+          }
           try {
             const sourceBuffer = mediaSource.addSourceBuffer(mimeType);
             sourceBuffer.mode = "segments";
             sourceBuffer.addEventListener("updateend", () => {
+              if (state.sourceBuffer !== sourceBuffer) {
+                return;
+              }
               logLine("sourceBuffer updateend");
+              trimBufferedMedia();
               syncPlaybackPosition("updateend");
               flushSourceBuffer();
               requestPlayback("updateend");
@@ -685,9 +807,15 @@ HTML_TEMPLATE = """<!doctype html>
         }, { once: true });
         mediaSource.addEventListener("sourceended", () => {
           logLine("media source ended");
+          if (state.mediaSource === mediaSource) {
+            invalidatePlayer("media source ended");
+          }
         });
         mediaSource.addEventListener("sourceclose", () => {
           logLine("media source closed");
+          if (state.mediaSource === mediaSource) {
+            invalidatePlayer("media source closed");
+          }
         });
 
         state.mediaSource = mediaSource;
@@ -702,6 +830,13 @@ HTML_TEMPLATE = """<!doctype html>
           return;
         }
         ensurePlayer(state.metadata);
+        if (state.initSegment && bytes !== state.initSegment && state.appendQueue.length >= __MAX_APPEND_QUEUE_SEGMENTS__) {
+          const dropped = Math.max(0, state.appendQueue.length - (__MAX_APPEND_QUEUE_SEGMENTS__ - 1));
+          state.appendQueue.splice(0, dropped);
+          if (dropped > 0) {
+            logLine(`dropped ${dropped} stale fragment(s) to keep live latency low`);
+          }
+        }
         state.appendQueue.push(bytes);
         flushSourceBuffer();
       }
@@ -857,6 +992,11 @@ HTML_TEMPLATE = """<!doctype html>
               logLine(`incoming stream failed: ${error.message}`);
             });
           }
+        } catch (error) {
+          if (!state.shuttingDown) {
+            logLine(`incoming stream reader failed: ${error.message}`);
+          }
+          throw error;
         } finally {
           reader.releaseLock();
         }
@@ -865,20 +1005,26 @@ HTML_TEMPLATE = """<!doctype html>
       function attachTransportClosedHandlers(transport, url) {
         transport.closed
           .then(() => {
-            if (state.transport === transport) {
+            const isCurrent = state.transport === transport;
+            if (isCurrent) {
               state.transport = null;
             }
-            setConnectionState("closed", "#5d524c");
-            logLine(`transport closed (${url})`);
+            if (!state.shuttingDown && isCurrent) {
+              setConnectionState("closed", "#5d524c");
+              logLine(`transport closed (${url})`);
+            }
           })
           .catch((error) => {
-            if (state.transport === transport) {
+            const isCurrent = state.transport === transport;
+            if (isCurrent) {
               state.transport = null;
             }
-            setConnectionState("error", "#8e1f0d");
-            elements.statusLine.textContent = "WebTransport closed with an error.";
-            elements.detailLine.textContent = error.message;
-            logLine(`transport closed with error (${url}): ${error.message}`);
+            if (!state.shuttingDown && isCurrent) {
+              setConnectionState("error", "#8e1f0d");
+              elements.statusLine.textContent = "WebTransport closed with an error.";
+              elements.detailLine.textContent = error.message;
+              logLine(`transport closed with error (${url}): ${error.message}`);
+            }
           });
       }
 
@@ -934,6 +1080,14 @@ HTML_TEMPLATE = """<!doctype html>
         throw new Error(`All WebTransport connection attempts failed. ${failures.join(" | ")}`);
       }
 
+      async function runTransportSession() {
+        const transport = await connectTransport();
+        setConnectionState("live", "#1f7a4b");
+        elements.statusLine.textContent = "WebTransport session is ready.";
+        elements.detailLine.textContent = "Waiting for subscriber metadata and init segment.";
+        await consumeIncomingStreams(transport);
+      }
+
       async function main() {
         if (!("WebTransport" in window)) {
           setConnectionState("unsupported", "#8e1f0d");
@@ -942,11 +1096,30 @@ HTML_TEMPLATE = """<!doctype html>
           return;
         }
 
-        const transport = await connectTransport();
-        setConnectionState("live", "#1f7a4b");
-        elements.statusLine.textContent = "WebTransport session is ready.";
-        elements.detailLine.textContent = "Waiting for subscriber metadata and init segment.";
-        await consumeIncomingStreams(transport);
+        let reconnectAttempt = 0;
+        await delay(250);
+        while (!state.shuttingDown) {
+          try {
+            await runTransportSession();
+            if (state.shuttingDown) {
+              return;
+            }
+            throw new Error("WebTransport session ended.");
+          } catch (error) {
+            if (state.shuttingDown) {
+              return;
+            }
+
+            reconnectAttempt += 1;
+            const retryDelay = Math.min(5000, 500 * reconnectAttempt);
+            setConnectionState("reconnecting", "#b34622");
+            elements.statusLine.textContent = "WebTransport is reconnecting.";
+            elements.detailLine.textContent = `Retrying in ${retryDelay}ms after: ${error.message}`;
+            logLine(`retrying WebTransport in ${retryDelay}ms: ${error.message}`);
+            closeActiveTransport("reconnect");
+            await delay(retryDelay);
+          }
+        }
       }
 
       window.addEventListener("pagehide", () => {
@@ -1136,6 +1309,9 @@ def build_player_page(
         .replace("__CERT_HASH__", cert_hash_hex)
         .replace("__LIVE_EDGE_DELAY_SECONDS__", repr(LIVE_EDGE_DELAY_SECONDS))
         .replace("__MIN_BUFFER_AHEAD_SECONDS__", repr(MIN_BUFFER_AHEAD_SECONDS))
+        .replace("__MAX_APPEND_QUEUE_SEGMENTS__", repr(MAX_APPEND_QUEUE_SEGMENTS))
+        .replace("__MAX_BUFFER_BACK_SECONDS__", repr(MAX_BUFFER_BACK_SECONDS))
+        .replace("__MAX_LIVE_LAG_SECONDS__", repr(MAX_LIVE_LAG_SECONDS))
     )
     return html.encode("utf-8")
 
@@ -1354,6 +1530,9 @@ class BrowserBridgeProtocol(QuicConnectionProtocol):
     def _handle_http_event(self, event: H3Event):
         if isinstance(event, HeadersReceived):
             self._handle_headers(event)
+        elif isinstance(event, DataReceived):
+            if event.stream_ended and event.stream_id in self._sessions:
+                self.drop_session(event.stream_id, reason="browser CONNECT stream ended")
         elif isinstance(event, DatagramReceived):
             logger.debug("Ignoring WebTransport datagram on session %d", event.stream_id)
         elif isinstance(event, WebTransportStreamDataReceived):
@@ -1363,6 +1542,8 @@ class BrowserBridgeProtocol(QuicConnectionProtocol):
                 event.stream_id,
                 len(event.data),
             )
+            if event.stream_ended:
+                self.drop_session(event.session_id, reason="browser WebTransport stream ended")
 
     def _handle_headers(self, event: HeadersReceived):
         headers = {name: value for name, value in event.headers}

@@ -16,6 +16,7 @@ behavior, and a single-file quick start.
 | `subscriber_example.py` | Subscribe to a track and receive live objects | Subscriber reference flow |
 | `webtransport_subscriber_example.py` | Subscribe over a WebTransport session | End-to-end WebTransport receive validation |
 | `video_publisher_example.py` | Generate a live timestamped H.264 test stream and publish it as stream objects | Real-time video stream validation |
+| `camera_publisher_example.py` | Capture a Windows laptop webcam with ffmpeg DirectShow and publish it as stream objects | Browser live camera validation on Windows |
 | `video_subscriber_example.py` | Reassemble the streamed fragmented MP4 into `receive.mp4` and preview it with `ffplay` | End-to-end live video receive validation |
 | `fetch_example.py` | Fetch historical objects by range | Cache and history validation |
 | `reconnection_example.py` | Reconnect and continue with relay-assisted recovery | Recovery and continuity testing |
@@ -82,6 +83,13 @@ behavior, and a single-file quick start.
 - Purpose: use `ffmpeg` to generate a live timestamped test pattern and publish it as H.264 fragmented MP4 over MOQ.
 - Best for: validating real-time stream delivery, QUIC stream fragmentation handling, and live publisher behavior without relying on a source file.
 - Checkpoints: metadata object sent first, live media chunks follow in order, and the relay forwards the subgroup stream correctly.
+
+### `camera_publisher_example.py`
+
+- Purpose: use `ffmpeg` DirectShow to capture a Windows laptop webcam and publish it as H.264 fragmented MP4 over MOQ.
+- Best for: validating browser live camera playback with `video_webtransport_subscriber_example.py`.
+- Checkpoints: confirm the default `Integrated Camera` DirectShow device exists, metadata is sent first, and live camera fragments follow continuously.
+- Camera discovery: run `ffmpeg -list_devices true -f dshow -i dummy` on Windows if you need to verify the camera device name.
 
 ### `video_subscriber_example.py`
 

@@ -4,6 +4,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
 import pytest
+from aioquic.h3.events import DataReceived
 from cryptography import x509
 from cryptography.hazmat.primitives.asymmetric import ec
 
@@ -204,6 +205,21 @@ def test_drop_session_removes_browser_session_from_bridge():
     session.close.assert_called_once()
 
 
+def test_browser_bridge_drops_session_when_connect_stream_ends():
+    protocol = object.__new__(BrowserBridgeProtocol)
+    protocol._bridge = SimpleNamespace(remove_session=Mock(), sessions=set())
+    session = SimpleNamespace(close=Mock(), session_id=11, origin="http://localhost:9004")
+    protocol._sessions = {11: session}
+
+    event = DataReceived(data=b"", stream_id=11, stream_ended=True)
+
+    BrowserBridgeProtocol._handle_http_event(protocol, event)
+
+    assert protocol._sessions == {}
+    protocol._bridge.remove_session.assert_called_once_with(session)
+    session.close.assert_called_once()
+
+
 def test_build_player_page_uses_explicit_webtransport_host():
     page = build_player_page(
         "0123456789abcdef",
@@ -220,9 +236,35 @@ def test_build_player_page_uses_explicit_webtransport_host():
     assert 'logLine("segment received before metadata; queued")' in page
     assert "flushPendingSegments();" in page
     assert "function syncPlaybackPosition(reason)" in page
-    assert "rangeEnd - 2.0" in page
-    assert "bufferAhead >= 0.75" in page
+    assert "function delay(milliseconds)" in page
+    assert "function tunePlaybackRate(bufferAhead)" in page
+    assert "function trimBufferedMedia()" in page
+    assert "function invalidatePlayer(reason)" in page
+    assert "function ensureInitSegmentQueued()" in page
+    assert "async function runTransportSession()" in page
+    assert "state.playerGeneration" in page
+    assert "lastTrimTime: 0" in page
+    assert "lastSeekTarget: null" in page
+    assert 'invalidatePlayer("media source closed")' in page
+    assert 'invalidatePlayer("media source is not open during append")' in page
+    assert "rangeEnd - 1.2" in page
+    assert "bufferAhead >= 0.5" in page
+    assert "liveLag > 3.0" in page
+    assert "now - state.lastTrimTime < 1500" in page
+    assert "trimBefore = currentTime - 1.0" in page
+    assert "removeEnd - firstRangeStart <= 1.0" in page
+    assert "trimmed buffered media before ${removeEnd.toFixed(3)}s" in page
+    assert 'logLine(`forced catch-up seek (${reason}): ${liveEdge.toFixed(3)}s`)' in page
+    assert "Math.abs(liveEdge - state.lastSeekTarget) < 0.25" in page
+    assert "liveEdge <= currentTime + 0.15" in page
+    assert "state.appendQueue.length >= 3" in page
+    assert "playbackRate = 1.04" in page
+    assert "playbackRate = 1.02" in page
+    assert 'logLine(`dropped ${dropped} stale fragment(s) to keep live latency low`)' in page
     assert 'logLine(`seeked to buffered range (${reason}): ${liveEdge.toFixed(3)}s`)' in page
+    assert 'await delay(250)' in page
+    assert 'logLine(`retrying WebTransport in ${retryDelay}ms: ${error.message}`)' in page
+    assert 'logLine(`incoming stream reader failed: ${error.message}`)' in page
     assert 'logLine(`appendBuffer failed: ${error.message}`)' in page
     assert 'logLine(`addSourceBuffer failed: ${error.message}`)' in page
     assert 'logLine("video playing")' in page
