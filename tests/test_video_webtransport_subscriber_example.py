@@ -14,6 +14,7 @@ ensure_repo_root()
 
 from examples.video_webtransport_subscriber_example import BrowserPageServer
 from examples.video_webtransport_subscriber_example import (
+    BROWSER_TRACK_PROFILE,
     BrowserBridgeProtocol,
     BrowserH3Connection,
     SETTINGS_WT_MAX_SESSIONS,
@@ -303,8 +304,21 @@ def test_build_browser_metadata_prefers_codec_inferred_from_init_segment():
 
     browser_metadata = build_browser_metadata(metadata, init_segment=init_segment)
 
+    assert browser_metadata["browser_track_profile"] == BROWSER_TRACK_PROFILE
+    assert browser_metadata["container"] == "fMP4"
+    assert browser_metadata["codec"] == "H.264"
     assert browser_metadata["mse_codec"] == "avc1.64001F"
     assert browser_metadata["mime_type"] == 'video/mp4; codecs="avc1.64001F"'
+
+
+def test_build_browser_metadata_rejects_unsupported_container():
+    with pytest.raises(ValueError, match="Unsupported browser container"):
+        build_browser_metadata({"codec": "H.264", "container": "webm"})
+
+
+def test_build_browser_metadata_rejects_unsupported_profile():
+    with pytest.raises(ValueError, match="Unsupported browser track profile"):
+        build_browser_metadata({"browser_track_profile": "custom-profile-v1"})
 
 
 def test_generate_webtransport_certificate_uses_browser_compatible_ecdsa_cert():

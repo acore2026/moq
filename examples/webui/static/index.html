@@ -1,0 +1,92 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>MOQ Camera Console</title>
+    <link rel="stylesheet" href="/static/styles.css?v=20260425-track-ready">
+    <script>
+      window.MOQ_WEBUI_CONFIG = {
+        wtHost: "__PUBLIC_HOST__",
+        wtPort: __WEBTRANSPORT_PORT__,
+        wtPath: "__WEBTRANSPORT_PATH__",
+      };
+    </script>
+  </head>
+  <body>
+    <main class="app-shell">
+      <section class="center-panel controls-panel">
+        <div class="panel-header">
+          <span class="panel-title">MANAGE TRACK LIST</span>
+          <span class="panel-count">SUBSCRIBE</span>
+        </div>
+        <div class="controls-grid">
+          <div class="track-form">
+            <label class="track-field">
+              <span class="track-field-label">Namespace</span>
+              <input class="text-input" id="namespaceInput" type="text" value="video" placeholder="video">
+            </label>
+            <label class="track-field">
+              <span class="track-field-label">Track Name</span>
+              <input class="text-input" id="trackNameInput" type="text" value="h264-live" placeholder="h264-live">
+            </label>
+            <button class="button track-add-button" id="subscriberButton" type="button">
+              <div><strong>Add Track</strong><br><span>Subscribe and preview this MOQ track</span></div>
+              <span>+</span>
+            </button>
+          </div>
+          <div class="subscription-list hidden" id="subscriptionListWrap">
+            <div class="subscription-list-label">Subscribed Tracks</div>
+            <div class="subscription-chips" id="subscriptionChips"></div>
+          </div>
+        </div>
+      </section>
+
+      <section class="sidebar-right videos-panel preview-panel hidden" id="previewPanel">
+        <div class="panel-header">
+          <span class="panel-title">VIDEOS</span>
+          <span class="panel-count" id="connectionText">idle</span>
+        </div>
+
+        <div class="video-grid">
+          <div class="video-card moq-card">
+            <div class="video-container">
+              <div class="preview-placeholder video-empty-state" id="previewPlaceholder">
+                <span class="empty-icon">▣</span>
+                <span class="empty-text">No video stream available</span>
+                <span class="empty-subtext">
+                  Start the subscriber bridge to expose the browser preview.
+                </span>
+              </div>
+
+              <div class="video-wrap hidden" id="videoWrap">
+                <video id="video" class="video-element real-video" autoplay muted playsinline controls></video>
+              </div>
+
+            </div>
+            <div class="video-info">
+              <span class="video-agent-name" id="previewTrackLabel">Preview Track: video/h264-live</span>
+              <span class="video-status moq" id="statusLine">Subscriber bridge is idle.</span>
+            </div>
+            <span class="hidden" id="detailLine">Add a track to subscribe. Relay and publishers must be started manually.</span>
+          </div>
+        </div>
+      </section>
+
+      <div class="hidden" id="logPanel">
+        <div id="logs"></div>
+      </div>
+    </main>
+    <div class="hidden" id="bridgeValue"></div>
+    <div class="hidden" id="byteCount"></div>
+    <div class="hidden" id="codecValue"></div>
+    <div class="hidden" id="fragmentCount"></div>
+    <div class="hidden" id="mimeValue"></div>
+    <div class="hidden" id="previewStats"></div>
+    <div class="hidden" id="relayValue"></div>
+    <div class="hidden" id="resolutionValue"></div>
+    <div class="hidden" id="trackValue">video/h264-live</div>
+    <div class="hidden" id="connectionBadge"></div>
+    <script src="/static/app.js?v=20260425-track-ready"></script>
+  </body>
+</html>

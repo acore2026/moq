@@ -304,6 +304,7 @@ async def main():
 
         metadata = {
             "type": "live-test-stream",
+            "browser_track_profile": "moq-browser-fmp4-h264-v1",
             "codec": "H.264",
             "container": "fMP4",
             "mime_type": DEFAULT_MIME_TYPE,

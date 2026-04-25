@@ -50,7 +50,6 @@ from examples.video_publisher_example import (
     RELAY_PORT,
     SUBGROUP_ID,
     SUBSCRIBER_GRACE_PERIOD,
-    TRACK_NAME,
     VIDEO_BITRATE,
     FragmentedMp4Muxer,
 )
@@ -62,6 +61,7 @@ CAMERA_INPUT_FORMAT_ENV = "MOQ_CAMERA_INPUT_FORMAT"
 CAMERA_RTBUF_SIZE = "64M"
 CAMERA_PROBE_SIZE = "32"
 CAMERA_ANALYZE_DURATION = "0"
+TRACK_NAME = FullTrackName([b"video"], b"camera-h264-live")
 
 
 def camera_input_format_from_environment() -> str | None:
@@ -243,6 +243,7 @@ async def main():
 
         metadata = {
             "type": "windows-camera-stream",
+            "browser_track_profile": "moq-browser-fmp4-h264-v1",
             "source": "windows-camera",
             "camera_name": camera_name,
             "codec": "H.264",

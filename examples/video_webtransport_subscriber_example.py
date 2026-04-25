@@ -65,6 +65,7 @@ WEBTRANSPORT_CERT_CACHE_ROOT = os.path.join(tempfile.gettempdir(), "moq-webtrans
 MAX_REPLAY_FRAGMENTS = 3
 DEFAULT_MSE_CODEC = "avc1.64001F"
 DEFAULT_MIME_TYPE = f'video/mp4; codecs="{DEFAULT_MSE_CODEC}"'
+BROWSER_TRACK_PROFILE = "moq-browser-fmp4-h264-v1"
 WEBTRANSPORT_CERT_VALIDITY_DAYS = 7
 LIVE_EDGE_DELAY_SECONDS = 1.2
 MIN_BUFFER_AHEAD_SECONDS = 0.5
@@ -1281,18 +1282,42 @@ def infer_avc1_codec_from_init_segment(init_segment: bytes) -> str | None:
     return f"avc1.{profile:02X}{compatibility:02X}{level:02X}"
 
 
-def build_browser_metadata(metadata: dict, init_segment: bytes | None = None) -> dict:
-    """Normalize stream metadata for browser playback."""
+def validate_browser_track_profile(metadata: dict, init_segment: bytes | None = None) -> dict:
+    """Validate that metadata matches the browser preview contract."""
     browser_metadata = dict(metadata)
+
+    profile = browser_metadata.get("browser_track_profile")
+    if profile is None:
+        profile = BROWSER_TRACK_PROFILE
+    if profile != BROWSER_TRACK_PROFILE:
+        raise ValueError(f"Unsupported browser track profile: {profile}")
+    browser_metadata["browser_track_profile"] = profile
+
+    container = str(browser_metadata.get("container") or "").strip()
+    if container and container.lower() != "fmp4":
+        raise ValueError(f"Unsupported browser container: {container}")
+    browser_metadata["container"] = "fMP4"
+
+    codec = str(browser_metadata.get("codec") or "").strip()
+    if codec and codec.upper() not in {"H.264", "H264"}:
+        raise ValueError(f"Unsupported browser codec: {codec}")
+    browser_metadata["codec"] = "H.264"
 
     inferred_codec = infer_avc1_codec_from_init_segment(init_segment) if init_segment is not None else None
     mse_codec = browser_metadata.get("mse_codec") or inferred_codec or DEFAULT_MSE_CODEC
+    browser_metadata["mse_codec"] = mse_codec
 
-    if browser_metadata.get("mse_codec") != mse_codec:
-        browser_metadata["mse_codec"] = mse_codec
+    mime_type = str(browser_metadata.get("mime_type") or f'video/mp4; codecs="{mse_codec}"').strip()
+    if not mime_type.startswith("video/mp4"):
+        raise ValueError(f"Unsupported browser mime type: {mime_type}")
+    browser_metadata["mime_type"] = mime_type
 
-    browser_metadata["mime_type"] = browser_metadata.get("mime_type") or f'video/mp4; codecs="{mse_codec}"'
     return browser_metadata
+
+
+def build_browser_metadata(metadata: dict, init_segment: bytes | None = None) -> dict:
+    """Normalize stream metadata for browser playback."""
+    return validate_browser_track_profile(metadata, init_segment=init_segment)
 
 
 def build_player_page(
@@ -1783,7 +1808,12 @@ async def main():
                 continue
 
             if obj.object_id == 1:
-                metadata = build_browser_metadata(json.loads(obj.payload.decode("utf-8")))
+                try:
+                    metadata = build_browser_metadata(json.loads(obj.payload.decode("utf-8")))
+                except ValueError as exc:
+                    logger.error("Rejected stream metadata: %s", exc)
+                    bridge.end_stream()
+                    continue
                 bridge.set_metadata(metadata)
                 logger.info(
                     "Received metadata: codec=%s resolution=%sx%s fps=%s mime=%s",
@@ -1797,7 +1827,12 @@ async def main():
 
             if bridge.init_segment is None:
                 if bridge.metadata is not None:
-                    metadata = build_browser_metadata(bridge.metadata, init_segment=obj.payload)
+                    try:
+                        metadata = build_browser_metadata(bridge.metadata, init_segment=obj.payload)
+                    except ValueError as exc:
+                        logger.error("Rejected initialization segment for browser playback: %s", exc)
+                        bridge.end_stream()
+                        continue
                     if metadata != bridge.metadata:
                         bridge.set_metadata(metadata)
                         logger.info("Updated browser codec from init segment: mse_codec=%s", metadata.get("mse_codec"))

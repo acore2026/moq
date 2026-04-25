@@ -17,6 +17,14 @@ behavior, and a single-file quick start.
 | `webtransport_subscriber_example.py` | Subscribe over a WebTransport session | End-to-end WebTransport receive validation |
 | `video_publisher_example.py` | Generate a live timestamped H.264 test stream and publish it as stream objects | Real-time video stream validation |
 | `camera_publisher_example.py` | Capture a Windows laptop webcam with ffmpeg DirectShow and publish it as stream objects | Browser live camera validation on Windows |
+| `webui/server.py` | Serve an external browser page for track subscription management and video preview | Browser subscription/display control |
+| `webui/start_relay.py` | Start only the WebUI-local relay | Manual relay startup for WebUI |
+| `webui/start_publishers.py` | Start the default WebUI synthetic video publishers without starting relay | Manual publisher startup for WebUI |
+| `webui/start_publisher_h264.py` | Start only the `video/h264-live` synthetic publisher | Single-track WebUI publisher startup |
+| `webui/start_publisher_testsrc.py` | Start only the `video/testsrc-live` synthetic publisher | Single-track WebUI publisher startup |
+| `webui/start_publisher_smptebars.py` | Start only the `video/smptebars-live` synthetic publisher | Single-track WebUI publisher startup |
+| `webui/start_camera_publisher.py` | Start only the WebUI-local camera publisher | Single-track WebUI camera startup |
+| `webui/start_relay_publishers.py` | Legacy combined WebUI relay and publisher starter | Compatibility shortcut |
 | `video_subscriber_example.py` | Reassemble the streamed fragmented MP4 into `receive.mp4` and preview it with `ffplay` | End-to-end live video receive validation |
 | `fetch_example.py` | Fetch historical objects by range | Cache and history validation |
 | `reconnection_example.py` | Reconnect and continue with relay-assisted recovery | Recovery and continuity testing |
@@ -90,6 +98,72 @@ behavior, and a single-file quick start.
 - Best for: validating browser live camera playback with `video_webtransport_subscriber_example.py`.
 - Checkpoints: confirm the default `Integrated Camera` DirectShow device exists, metadata is sent first, and live camera fragments follow continuously.
 - Camera discovery: run `ffmpeg -list_devices true -f dshow -i dummy` on Windows if you need to verify the camera device name.
+
+### `webui/server.py`
+
+- Purpose: expose an HTTPS browser-accessible control page on `0.0.0.0:9004` for subscribing/unsubscribing externally published MOQ video tracks and showing the selected preview.
+- Best for: browser-only preview control when relay and publishers are managed by a separate terminal/script.
+- Checkpoints: start `python examples/webui/start_relay.py`, start `python examples/webui/start_publishers.py`, then `python examples/webui/server.py`, open `https://<host>:9004/`, add a track from the Manage Track List panel, and verify the preview deck shows the live stream.
+
+### `webui/start_relay.py`
+
+- Purpose: manually start only the WebUI-local relay on `127.0.0.1:28446`.
+- Best for: managing the relay lifecycle independently from publisher processes.
+- Checkpoints: relay should listen on `127.0.0.1:28446`; WebUI subscribers connect to this relay by default.
+
+### `webui/start_publishers.py`
+
+- Purpose: manually start multiple synthetic publishers without starting relay.
+- Best for: keeping publisher lifecycle separate from relay and browser subscription operations.
+- Checkpoints: by default, three WebUI test sources are published: `video/h264-live`, `video/testsrc-live`, and `video/smptebars-live`; use `--sources all` only when the host has enough CPU for every 720p/30fps x264 source.
+
+### Single WebUI Publisher Starters
+
+- `webui/start_publisher_h264.py`: publishes `video/h264-live`.
+- `webui/start_publisher_testsrc.py`: publishes `video/testsrc-live`.
+- `webui/start_publisher_smptebars.py`: publishes `video/smptebars-live`.
+- `webui/start_camera_publisher.py`: publishes the camera track through the WebUI-local relay defaults.
+
+### `webui/start_relay_publishers.py`
+
+- Purpose: compatibility shortcut that still starts relay plus multiple synthetic publishers in one process.
+- Best for: older workflows that used one command for the full WebUI media stack.
+
+### Browser Preview Contract
+
+The browser-facing examples (`video_webtransport_subscriber_example.py` and
+`webui/server.py`) do not accept arbitrary object payloads. They expect a
+specific browser preview profile:
+
+- `browser_track_profile`: `moq-browser-fmp4-h264-v1`
+- `container`: `fMP4`
+- `codec`: `H.264`
+- `mime_type`: `video/mp4; codecs="avc1...."`
+
+They also expect a specific live object layout on the subscribed track:
+
+1. `group_id=1, object_id=1`: UTF-8 JSON metadata
+2. `group_id=1, object_id=2`: MP4 initialization segment
+3. `group_id=1, object_id>=3`: live fragmented MP4 media segments
+
+Current browser preview behavior assumes:
+
+- only `group_id == 1` carries the live preview stream
+- metadata arrives before the init segment
+- the init segment is compatible with MSE `video/mp4`
+- later objects can be appended as continuous CMAF/fMP4 fragments
+
+If a publisher sends a different container, codec, or object ordering, the
+bridge now rejects that stream for browser playback and logs a clear error
+instead of failing later inside the browser `SourceBuffer`.
+
+The maintained publishers already emit the expected profile:
+
+- `video_publisher_example.py`
+- `camera_publisher_example.py`
+
+If you build your own publisher and want browser playback to work with the
+existing preview bridge, follow the same contract.
 
 ### `video_subscriber_example.py`
 
