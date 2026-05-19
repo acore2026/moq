@@ -82,6 +82,215 @@ For longer backfill windows, increase the in-memory group retention before start
 MOQ_LITE_MAX_GROUP_AGE_SECS=300 just relay
 ```
 
+### ACN / Agent GW Integration
+
+This branch is also used by the ACN Agent GW MoQ Rust integration. In that setup,
+this repository provides the patched Rust binaries:
+
+```text
+target/release/moq-cli
+target/release/moq-relay
+```
+
+The Python integration layer lives in a separate Agent GW repository:
+
+```text
+acn_gw_moq-rust/moq_rust/
+```
+
+That Python layer packages `moq-cli` into a wheel and exposes Python-friendly
+APIs for:
+
+- ACN SDK object/bytes publish, subscribe, and fetch workflows.
+- Real-time camera publishing through `ffmpeg -> moq-cli publish avc3`.
+- Local relay and browser viewer tests using `moq-relay` and
+  `moq-cli subscribe --output avc3`.
+
+The recommended real-time video path is:
+
+```text
+Remote camera
+  -> ffmpeg H.264 Annex-B
+  -> Python wheel starts moq-cli publish avc3
+  -> moq-relay on :9007
+  -> moq-cli subscribe --output avc3
+  -> Agent GW test viewer on :9008
+  -> Browser WebCodecs
+```
+
+Python manages process lifecycle only; video bytes stay on the native
+`ffmpeg -> moq-cli` hot path.
+
+### Build Patched Binaries for ACN
+
+Build the patched CLI and relay from this repository:
+
+```sh
+cd /path/to/moq
+cargo build --release --package moq-cli
+cargo build --release --package moq-relay
+```
+
+The Linux outputs are:
+
+```text
+target/release/moq-cli
+target/release/moq-relay
+```
+
+On Windows, build at least `moq-cli.exe` for remote camera publishers:
+
+```powershell
+cd D:\path\to\moq
+cargo build --release --package moq-cli
+```
+
+The Windows output is:
+
+```text
+target\release\moq-cli.exe
+```
+
+Verify that the build contains the ACN video path:
+
+```sh
+target/release/moq-cli subscribe --help
+```
+
+The output must include:
+
+```text
+avc3
+```
+
+### Package moq-cli into the Python Wheel
+
+In the Agent GW repository, copy the built binary into the Python package data
+directory before building the wheel.
+
+Linux example:
+
+```sh
+cd /path/to/acn_gw_moq-rust/moq_rust
+
+python3 tools/package_moq_rust_video_binary.py \
+  /path/to/moq/target/release/moq-cli \
+  --system Linux \
+  --machine x86_64
+
+python3 -m pip wheel . -w dist --no-deps --no-build-isolation
+```
+
+Windows example:
+
+```powershell
+cd D:\path\to\acn_gw_moq-rust\moq_rust
+
+python tools\package_moq_rust_video_binary.py `
+  D:\path\to\moq\target\release\moq-cli.exe `
+  --system Windows `
+  --machine AMD64
+
+python -m pip wheel . -w dist --no-deps --no-build-isolation
+```
+
+The resulting wheel contains the platform-specific `moq-cli` binary. `ffmpeg`
+is not bundled and must be installed separately or passed to the Python API by
+absolute path.
+
+### Real-Time Video Test with Agent GW Viewer
+
+The Agent GW test viewer uses the following ports by convention:
+
+```text
+9007: Rust moq-relay
+9008: HTTPS browser viewer
+```
+
+Do not use the Agent GW production ports for this test unless explicitly
+intended:
+
+```text
+9001: ARF
+9002: ACF
+9003: Python MOQT relay
+```
+
+Start the relay and HTTPS viewer from the Agent GW repository:
+
+```sh
+cd /path/to/acn_gw_moq-rust
+
+MOQ_OFFICIAL_RELAY_BIN=/path/to/moq/target/release/moq-relay \
+python3 moq_rust/tools/moq_live_video_viewer.py \
+  --subscriber rust-avc3 \
+  --moq-cli-bin /path/to/moq/target/release/moq-cli \
+  --relay-host 0.0.0.0 \
+  --relay-port 9007 \
+  --web-host 0.0.0.0 \
+  --web-port 9008 \
+  --cert-host <server-ip> \
+  --log-level INFO
+```
+
+Open:
+
+```text
+https://<server-ip>:9008/
+```
+
+The viewer uses browser WebCodecs, so remote browser access should use HTTPS.
+When using the generated self-signed certificate, the browser will require a
+manual trust/continue action.
+
+Remote Windows camera publishing uses the Python wheel API:
+
+```powershell
+python .\remote_camera_publish.py `
+  --relay-url http://<server-ip>:9007/ `
+  --name camera `
+  --backend dshow `
+  --camera-name "HD Camera" `
+  --width 1280 `
+  --height 720 `
+  --fps 30 `
+  --bitrate 2500k `
+  --print-logs
+```
+
+The relay URL remains HTTP because it is used by `moq-cli` for the relay
+certificate fetch and WebTransport connection setup:
+
+```text
+http://<server-ip>:9007/
+```
+
+### ACN Compatibility Notes
+
+The current integration targets the ACN SDK's common `moq-python` usage:
+
+- live object publish/subscribe
+- arbitrary bytes payloads
+- bounded fetch/backfill workflows
+- Rust relay fan-out
+- low-latency real-time video through `avc3`
+
+It is not a complete IETF draft-17 implementation of every protocol surface.
+Known boundaries:
+
+- joining fetch is not supported;
+- advanced priority and all fine-grained draft-17 controls are not fully
+  exposed through the Python wrapper;
+- precise end-to-end video latency metrics require an application timestamp
+  side channel or an extended AVC3 frame header.
+
+For production ACN usage, prefer:
+
+```text
+Object/bytes data: moq_rust_client.RustCliMoQClient + moq-relay
+Real-time video:   moq_rust_video + ffmpeg + moq-cli avc3 + moq-relay
+```
+
 ### Full Setup
 
 If you don't like Nix, then you can install dependencies manually:
