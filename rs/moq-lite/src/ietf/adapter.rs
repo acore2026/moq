@@ -9,7 +9,10 @@ use tokio::sync::mpsc;
 use crate::{
 	Error, PathOwned,
 	coding::{Decode, Encode, Reader, Writer},
-	ietf::{self, RequestId},
+	ietf::{
+		self, RequestId,
+		message::{decode_message_size, encode_message_size},
+	},
 };
 
 use super::{Control, Message, Version};
@@ -135,13 +138,13 @@ impl OutgoingRegistration {
 		let Ok(type_id) = u64::decode(&mut cursor, self.version) else {
 			return Ok(None);
 		};
-		let Ok(size) = u16::decode(&mut cursor, self.version) else {
+		let Ok(size) = decode_message_size(&mut cursor, self.version) else {
 			return Ok(None);
 		};
 
 		// We know the full message size now: header bytes + body.
 		let header_len = cursor.position() as usize;
-		let message_len = header_len + size as usize;
+		let message_len = header_len + size;
 		if self.buf.len() < message_len {
 			return Ok(None);
 		}
@@ -407,9 +410,12 @@ impl<S: web_transport_trait::Session> ControlStreamAdapter<S> {
 				None => return Ok(()),
 			};
 
-			let size: u16 = reader.decode::<u16>().await?;
+			let size = match self.version {
+				Version::Draft17 => reader.decode::<usize>().await?,
+				Version::Draft14 | Version::Draft15 | Version::Draft16 => reader.decode::<u16>().await? as usize,
+			};
 
-			let body = reader.read_exact(size as usize).await?;
+			let body = reader.read_exact(size).await?;
 
 			// Reconstruct raw message bytes: [type_id][size][body]
 			let raw = encode_raw(type_id, size, &body, self.version);
@@ -735,11 +741,11 @@ enum Route {
 	GoAway,
 }
 
-/// Encode raw message bytes as [type_id varint][size u16][body].
-fn encode_raw(type_id: u64, size: u16, body: &Bytes, version: Version) -> Bytes {
+/// Encode raw message bytes as [type_id varint][size][body].
+fn encode_raw(type_id: u64, size: usize, body: &Bytes, version: Version) -> Bytes {
 	let mut buf = BytesMut::new();
 	type_id.encode(&mut buf, version).expect("encode type_id");
-	size.encode(&mut buf, version).expect("encode size");
+	encode_message_size(&mut buf, size, version).expect("encode size");
 	buf.extend_from_slice(body);
 	buf.freeze()
 }

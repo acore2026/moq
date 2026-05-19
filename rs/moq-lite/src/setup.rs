@@ -5,6 +5,7 @@ use crate::{
 	coding::{self, Decode, DecodeError, Encode, EncodeError, Sizer},
 	ietf, lite,
 };
+use ietf::message::{decode_message_size, encode_message_size};
 
 const CLIENT_SETUP: u8 = 0x20;
 const SERVER_SETUP: u8 = 0x21;
@@ -32,9 +33,7 @@ impl Encode<Version> for Setup {
 	fn encode<W: bytes::BufMut>(&self, w: &mut W, v: Version) -> Result<(), EncodeError> {
 		Self::check_version(v);
 		SETUP_V17.encode(w, v)?;
-		u16::try_from(self.parameters.len())
-			.map_err(|_| EncodeError::TooLarge)?
-			.encode(w, v)?;
+		encode_message_size(w, self.parameters.len(), ietf::Version::Draft17)?;
 		if w.remaining_mut() < self.parameters.len() {
 			return Err(EncodeError::Short);
 		}
@@ -50,7 +49,7 @@ impl Decode<Version> for Setup {
 		if kind != SETUP_V17 {
 			return Err(DecodeError::InvalidValue);
 		}
-		let size = u16::decode(r, v)? as usize;
+		let size = decode_message_size(r, ietf::Version::Draft17)?;
 		if r.remaining() < size {
 			return Err(DecodeError::Short);
 		}

@@ -15,6 +15,8 @@ We don't want you to hit a brick wall if you deviate from the standard path (*ah
 
 See [Layers](/concept/layer/) for more information.
 
+See [Architecture](/concept/architecture) for a high-level map of the Rust crates, applications, bindings, and runtime dependencies.
+
 ## Standards
 
 MoQ is built on open standards and protocol specifications.

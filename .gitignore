@@ -6,6 +6,10 @@
 # Ignore local Claude Code config
 *.local.json
 
+# Local agent/session state
+.agents/
+.codex/
+
 # IDE
 .idea
 
@@ -45,3 +49,4 @@ pnpm-lock.yaml
 __pycache__/
 *.pyc
 .venv/
+.pytest_cache/

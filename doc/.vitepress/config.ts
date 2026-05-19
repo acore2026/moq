@@ -71,6 +71,7 @@ export default defineConfig({
 					text: "Concepts",
 					link: "/concept/",
 					items: [
+						{ text: "Architecture", link: "/concept/architecture" },
 						{
 							text: "Layers",
 							link: "/concept/layer/",

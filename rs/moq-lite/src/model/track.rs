@@ -18,13 +18,25 @@ use super::{Group, GroupConsumer, GroupProducer};
 
 use std::{
 	collections::{HashSet, VecDeque},
+	sync::OnceLock,
 	task::{Poll, ready},
 	time::Duration,
 };
 
 /// Groups older than this are evicted from the track cache (unless they are the max_sequence group).
-// TODO: Replace with a configurable cache size.
+// Can be overridden with MOQ_LITE_MAX_GROUP_AGE_SECS for ACN fetch/backfill use cases.
 const MAX_GROUP_AGE: Duration = Duration::from_secs(30);
+
+fn max_group_age() -> Duration {
+	static VALUE: OnceLock<Duration> = OnceLock::new();
+	*VALUE.get_or_init(|| {
+		std::env::var("MOQ_LITE_MAX_GROUP_AGE_SECS")
+			.ok()
+			.and_then(|value| value.parse::<u64>().ok())
+			.map(Duration::from_secs)
+			.unwrap_or(MAX_GROUP_AGE)
+	})
+}
 
 /// A track is a collection of groups, delivered out-of-order until expired.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -34,6 +46,10 @@ pub struct Track {
 	pub name: String,
 	/// Delivery priority. Higher values preempt lower ones when bandwidth is constrained.
 	pub priority: u8,
+	/// Optional first group requested by a consumer for protocol-level backfill/fetch.
+	pub start_group: Option<u64>,
+	/// Optional last group requested by a consumer for bounded backfill/fetch.
+	pub end_group: Option<u64>,
 }
 
 impl Track {
@@ -42,7 +58,16 @@ impl Track {
 		Self {
 			name: name.into(),
 			priority: 0,
+			start_group: None,
+			end_group: None,
 		}
+	}
+
+	/// Return this track with a requested group range.
+	pub fn with_group_range(mut self, start_group: Option<u64>, end_group: Option<u64>) -> Self {
+		self.start_group = start_group;
+		self.end_group = end_group;
+		self
 	}
 
 	/// Consume this [`Track`] to create a producer that owns its metadata.
@@ -176,7 +201,7 @@ impl State {
 				continue;
 			}
 
-			if now.duration_since(*created_at) <= MAX_GROUP_AGE {
+			if now.duration_since(*created_at) <= max_group_age() {
 				break;
 			}
 

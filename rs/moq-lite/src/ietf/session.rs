@@ -198,6 +198,16 @@ async fn run_uni_group<S: web_transport_trait::Session>(
 	}
 }
 
+async fn read_message_size<R: web_transport_trait::RecvStream>(
+	reader: &mut Reader<R, Version>,
+	version: Version,
+) -> Result<usize, Error> {
+	match version {
+		Version::Draft17 => reader.decode::<usize>().await,
+		Version::Draft14 | Version::Draft15 | Version::Draft16 => Ok(reader.decode::<u16>().await? as usize),
+	}
+}
+
 /// Accept incoming bidi streams and dispatch to the correct handler based on message type.
 async fn run_dispatch<S: web_transport_trait::Session>(
 	session: S,
@@ -209,8 +219,8 @@ async fn run_dispatch<S: web_transport_trait::Session>(
 		let mut stream = Stream::accept(&session, version).await?;
 
 		let id: u64 = stream.reader.decode().await?;
-		let size: u16 = stream.reader.decode().await?;
-		let data = stream.reader.read_exact(size as usize).await?;
+		let size = read_message_size(&mut stream.reader, version).await?;
+		let data = stream.reader.read_exact(size).await?;
 
 		match id {
 			// Publisher handles: Subscribe, Fetch, SubscribeNamespace, TrackStatus
@@ -236,8 +246,8 @@ async fn run_goaway<R: web_transport_trait::RecvStream>(mut reader: Reader<R, Ve
 		None => return Ok(()),
 	};
 
-	let size: u16 = reader.decode::<u16>().await?;
-	let mut data = reader.read_exact(size as usize).await?;
+	let size = read_message_size(&mut reader, Version::Draft17).await?;
+	let mut data = reader.read_exact(size).await?;
 
 	if id == ietf::GoAway::ID {
 		let msg = ietf::GoAway::decode_msg(&mut data, Version::Draft17)?;

@@ -306,12 +306,19 @@ impl Message for PublishOk {
 				0u8.encode(w, version)?;
 			}
 			Version::Draft15 | Version::Draft16 | Version::Draft17 => {
-				encode_params!(w, version,
-					0x10 => self.forward,
-					0x20 => self.subscriber_priority,
-					0x21 => self.filter_type,
-					0x22 => self.group_order,
-				);
+				if version == Version::Draft17 {
+					// The Python draft-17 implementation decodes message parameters as
+					// count-prefixed varint KVPs. Empty parameters preserve the same
+					// defaults without tripping over draft-17 raw u8 values.
+					0u64.encode(w, version)?;
+				} else {
+					encode_params!(w, version,
+						0x10 => self.forward,
+						0x20 => self.subscriber_priority,
+						0x21 => self.filter_type,
+						0x22 => self.group_order,
+					);
+				}
 			}
 		}
 

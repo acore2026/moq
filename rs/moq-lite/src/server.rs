@@ -48,7 +48,7 @@ impl Server {
 		}
 
 		let (encoding, supported) = match session.protocol() {
-			Some(ALPN_17) => {
+			Some(ALPN_17) | Some(ALPN_14) => {
 				let v = self
 					.versions
 					.select(Version::Ietf(ietf::Version::Draft17))
@@ -79,13 +79,6 @@ impl Server {
 				let v = self
 					.versions
 					.select(Version::Ietf(ietf::Version::Draft15))
-					.ok_or(Error::Version)?;
-				(v, v.into())
-			}
-			Some(ALPN_14) => {
-				let v = self
-					.versions
-					.select(Version::Ietf(ietf::Version::Draft14))
 					.ok_or(Error::Version)?;
 				(v, v.into())
 			}

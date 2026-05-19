@@ -270,7 +270,7 @@ impl NoqRequest {
 
 		let alpn = handshake.protocol.context("missing ALPN")?;
 		let alpn = String::from_utf8(alpn).context("failed to decode ALPN")?;
-		let host = handshake.server_name.unwrap_or_default();
+		let host = handshake.server_name.unwrap_or_else(|| "localhost".to_string());
 
 		tracing::debug!(%host, ip = %conn.remote_address(), %alpn, "accepting");
 
@@ -290,7 +290,6 @@ impl NoqRequest {
 				Ok(Self::WebTransport { request, alpns })
 			}
 			alpn if moq_lite::ALPNS.contains(&alpn) => {
-				anyhow::ensure!(!host.is_empty(), "missing server name for raw QUIC connection");
 				let host_str = if host.contains(':') {
 					format!("[{}]", host)
 				} else {

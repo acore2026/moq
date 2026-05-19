@@ -7,7 +7,7 @@ use web_transport_trait::SendStream;
 use crate::{
 	AsPath, Error, Origin, OriginConsumer, Track, TrackConsumer,
 	coding::{Stream, Writer},
-	ietf::{self, Control, FetchHeader, FetchType, FilterType, GroupOrder, Location, RequestId},
+	ietf::{self, Control, FetchHeader, FetchType, FilterType, GroupFlags, GroupOrder, Location, RequestId},
 	model::GroupConsumer,
 };
 
@@ -116,6 +116,8 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		let track = Track {
 			name: msg.track_name.to_string(),
 			priority: msg.subscriber_priority,
+			start_group: None,
+			end_group: None,
 		};
 
 		let track = match broadcast.subscribe_track(&track) {
@@ -239,7 +241,10 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 				group_id: sequence,
 				sub_group_id: 0,
 				publisher_priority: 0,
-				flags: Default::default(),
+				flags: GroupFlags {
+					has_subgroup: true,
+					..Default::default()
+				},
 			};
 
 			tasks.push(Self::run_group(self.session.clone(), msg, track.priority, group, self.version).map(|_| ()));
@@ -318,8 +323,44 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 	/// Handle a FETCH on its bidi stream.
 	async fn run_fetch_stream(self, mut stream: Stream<S, Version>, msg: ietf::Fetch<'_>) -> Result<(), Error> {
 		let _subscribe_id = match msg.fetch_type {
-			FetchType::Standalone { .. } => {
-				self.write_fetch_error(&mut stream.writer, msg.request_id, 500, "not supported")
+			FetchType::Standalone {
+				ref namespace,
+				ref track,
+				ref start,
+				ref end,
+			} => {
+				let Some(broadcast) = self.origin.get_broadcast(namespace) else {
+					self.write_fetch_error(&mut stream.writer, msg.request_id, 404, "Broadcast not found")
+						.await?;
+					return Ok(());
+				};
+
+				let track_info = Track {
+					name: track.to_string(),
+					priority: msg.subscriber_priority,
+					start_group: Some(start.group),
+					end_group: Some(end.group),
+				};
+				let track = match broadcast.subscribe_track(&track_info) {
+					Ok(track) => track,
+					Err(err) => {
+						self.write_fetch_error(&mut stream.writer, msg.request_id, 404, &err.to_string())
+							.await?;
+						return Ok(());
+					}
+				};
+
+				self.write_fetch_ok(
+					&mut stream.writer,
+					msg.request_id,
+					msg.group_order.any_to_descending(),
+					Location {
+						group: end.group,
+						object: end.object,
+					},
+				)
+				.await?;
+				self.write_fetch_objects(msg.request_id, track, start, end, msg.subscriber_priority)
 					.await?;
 				return Ok(());
 			}
@@ -342,7 +383,13 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		};
 
 		// Send FetchOk/RequestOk
-		self.write_fetch_ok(&mut stream.writer, msg.request_id).await?;
+		self.write_fetch_ok(
+			&mut stream.writer,
+			msg.request_id,
+			GroupOrder::Descending,
+			Location { group: 0, object: 0 },
+		)
+		.await?;
 
 		// Create a uni stream with just a FetchHeader and FIN it
 		let uni = self.session.open_uni().await.map_err(Error::from_transport)?;
@@ -363,6 +410,8 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		&self,
 		writer: &mut Writer<S::SendStream, Version>,
 		request_id: RequestId,
+		group_order: GroupOrder,
+		end_location: Location,
 	) -> Result<(), Error> {
 		match self.version {
 			Version::Draft14 => {
@@ -370,9 +419,9 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 				writer
 					.encode(&ietf::FetchOk {
 						request_id: Some(request_id),
-						group_order: GroupOrder::Descending,
+						group_order,
 						end_of_track: false,
-						end_location: Location { group: 0, object: 0 },
+						end_location,
 					})
 					.await?;
 			}
@@ -390,6 +439,58 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 			}
 		}
 		Ok(())
+	}
+
+	async fn write_fetch_objects(
+		&self,
+		request_id: RequestId,
+		track: TrackConsumer,
+		start: &Location,
+		end: &Location,
+		priority: u8,
+	) -> Result<(), Error> {
+		let uni = self.session.open_uni().await.map_err(Error::from_transport)?;
+		let mut writer = Writer::new(uni, self.version);
+		writer.encode(&FetchHeader::TYPE).await?;
+		writer.encode(&FetchHeader { request_id }).await?;
+
+		if end.group < start.group {
+			writer.finish()?;
+			return writer.closed().await;
+		}
+
+		for sequence in start.group..=end.group {
+			let group = tokio::time::timeout(std::time::Duration::from_millis(100), track.get_group(sequence)).await;
+			let Ok(group) = group else {
+				continue;
+			};
+			let Some(mut group) = group? else {
+				continue;
+			};
+
+			let mut object_id = 0u64;
+			while let Some(mut payload) = group.read_frame().await? {
+				if sequence == start.group && object_id < start.object {
+					object_id += 1;
+					continue;
+				}
+				if sequence == end.group && object_id > end.object {
+					break;
+				}
+
+				// ACN-compatible FetchObject form: explicit group, object, priority, payload.
+				writer.encode(&0x5cu64).await?;
+				writer.encode(&sequence).await?;
+				writer.encode(&object_id).await?;
+				writer.encode(&priority).await?;
+				writer.encode(&(payload.len() as u64)).await?;
+				writer.write_all(&mut payload).await?;
+				object_id += 1;
+			}
+		}
+
+		writer.finish()?;
+		writer.closed().await
 	}
 
 	async fn write_fetch_error(

@@ -2,6 +2,7 @@
 
 use std::borrow::Cow;
 
+use bytes::Buf;
 use num_enum::{IntoPrimitive, TryFromPrimitive};
 
 use crate::{
@@ -36,6 +37,103 @@ impl Decode<Version> for FilterType {
 	fn decode<R: bytes::Buf>(r: &mut R, version: Version) -> Result<Self, DecodeError> {
 		Self::try_from(u64::decode(r, version)?).map_err(|_| DecodeError::InvalidValue)
 	}
+}
+
+fn decode_subscribe_params<R: bytes::Buf>(
+	r: &mut R,
+	version: Version,
+) -> Result<(u8, GroupOrder, FilterType), DecodeError> {
+	decode_params!(r, version,
+		0x10 => forward: Option<bool>,
+		0x20 => subscriber_priority: Option<u8>,
+		0x21 => filter_type: Option<FilterType>,
+		0x22 => group_order: Option<GroupOrder>,
+	);
+
+	if forward == Some(false) {
+		return Err(DecodeError::Unsupported);
+	}
+
+	Ok((
+		subscriber_priority.unwrap_or(128),
+		group_order.unwrap_or(GroupOrder::Descending),
+		filter_type.unwrap_or(FilterType::LargestObject),
+	))
+}
+
+fn decode_python_group_order(value: u8) -> Result<GroupOrder, DecodeError> {
+	match value {
+		0 => Ok(GroupOrder::Ascending),
+		1 => Ok(GroupOrder::Descending),
+		2 => Ok(GroupOrder::Descending),
+		_ => Err(DecodeError::InvalidValue),
+	}
+}
+
+fn decode_python_parameters<R: bytes::Buf>(r: &mut R, version: Version) -> Result<(), DecodeError> {
+	let count = u64::decode(r, version)?;
+	if count > 64 {
+		return Err(DecodeError::TooMany);
+	}
+
+	let mut prev_type = 0u64;
+	for _ in 0..count {
+		let delta = u64::decode(r, version)?;
+		let key_type = prev_type.checked_add(delta).ok_or(DecodeError::BoundsExceeded)?;
+		prev_type = key_type;
+
+		if key_type % 2 == 0 {
+			let _value = u64::decode(r, version)?;
+		} else {
+			let _value = Vec::<u8>::decode(r, version)?;
+		}
+	}
+
+	Ok(())
+}
+
+fn decode_python_subscribe_tail<R: bytes::Buf>(
+	r: &mut R,
+	version: Version,
+) -> Result<(u8, GroupOrder, FilterType), DecodeError> {
+	let subscriber_priority = u8::decode(r, version)?;
+	let group_order = decode_python_group_order(u8::decode(r, version)?)?;
+	let filter_type = FilterType::decode(r, version)?;
+
+	match filter_type {
+		FilterType::AbsoluteStart => {
+			let _start = Location::decode(r, version)?;
+		}
+		FilterType::AbsoluteRange => {
+			let _start = Location::decode(r, version)?;
+			let _end_group = u64::decode(r, version)?;
+			let _end_object = u64::decode(r, version)?;
+		}
+		FilterType::NextGroup | FilterType::LargestObject => {}
+	}
+
+	if r.has_remaining() {
+		decode_python_parameters(r, version)?;
+	}
+	if r.has_remaining() {
+		return Err(DecodeError::Long);
+	}
+
+	Ok((subscriber_priority, group_order, filter_type))
+}
+
+fn decode_draft17_subscribe_tail<R: bytes::Buf>(r: &mut R) -> Result<(u8, GroupOrder, FilterType), DecodeError> {
+	let tail = r.copy_to_bytes(r.remaining());
+
+	let mut params = std::io::Cursor::new(tail.clone());
+	if let Ok(decoded) = decode_subscribe_params(&mut params, Version::Draft17) {
+		if !params.has_remaining() {
+			return Ok(decoded);
+		}
+	}
+
+	let mut python = std::io::Cursor::new(tail);
+	decode_python_subscribe_tail(&mut python, Version::Draft17)
 }
 
 /// Subscribe message (0x03)
@@ -95,20 +193,11 @@ impl Message for Subscribe<'_> {
 				})
 			}
 			Version::Draft15 | Version::Draft16 | Version::Draft17 => {
-				decode_params!(r, version,
-					0x10 => forward: Option<bool>,
-					0x20 => subscriber_priority: Option<u8>,
-					0x21 => filter_type: Option<FilterType>,
-					0x22 => group_order: Option<GroupOrder>,
-				);
-
-				if forward == Some(false) {
-					return Err(DecodeError::Unsupported);
-				}
-
-				let subscriber_priority = subscriber_priority.unwrap_or(128);
-				let group_order = group_order.unwrap_or(GroupOrder::Descending);
-				let filter_type = filter_type.unwrap_or(FilterType::LargestObject);
+				let (subscriber_priority, group_order, filter_type) = if version == Version::Draft17 {
+					decode_draft17_subscribe_tail(r)?
+				} else {
+					decode_subscribe_params(r, version)?
+				};
 
 				Ok(Self {
 					request_id,

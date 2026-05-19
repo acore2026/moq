@@ -48,6 +48,35 @@ Note that this uses an insecure HTTP fetch for local development only; in produc
 
 *TIP:* If you've installed [nix-direnv](https://github.com/nix-community/nix-direnv), then only `just` is required.
 
+### Python Integration
+
+A complete Python video streaming demo is available in [`demo/python`](demo/python) that demonstrates:
+
+- **Python publisher**: Captures video with ffmpeg and publishes to relay using moq-lite
+- **Python subscriber**: Receives video frames and displays in browser
+- **Latency testing**: Benchmarks showing 1-2ms round-trip latency
+- **Remote streaming**: Cross-platform camera capture (Windows/Linux)
+
+**Quick start**:
+
+```bash
+cd demo/python
+
+# Start relay (QUIC:9003, HTTP:9004)
+python3 scripts/start_relay_with_web.py
+
+# Publish camera video (on remote PC)
+python3 scripts/remote_camera_publisher.py --relay https://SERVER_IP:9003 --broadcast live-stream --no-tls-verify
+
+# View in browser
+open http://SERVER_IP:9004
+```
+
+**Documentation**:
+- [PYTHON_VIDEO_INTEGRATION_FINAL.md](demo/python/PYTHON_VIDEO_INTEGRATION_FINAL.md) - Integration guide
+- [LATENCY_COMPARISON_REPORT.md](demo/python/LATENCY_COMPARISON_REPORT.md) - Performance benchmarks
+- [REMOTE_VIDEO_SETUP_GUIDE.md](demo/python/REMOTE_VIDEO_SETUP_GUIDE.md) - Remote streaming setup
+
 ### Full Setup
 
 If you don't like Nix, then you can install dependencies manually:

@@ -1,10 +1,13 @@
 mod client;
+mod fetch;
+mod object;
 mod publish;
 mod server;
 mod subscribe;
 mod web;
 
 use client::*;
+use fetch::*;
 use hang::moq_lite;
 use publish::*;
 use server::*;
@@ -91,6 +94,23 @@ pub enum Command {
 		#[command(flatten)]
 		args: SubscribeArgs,
 	},
+	/// Fetch cached objects from a broadcast and write them to stdout.
+	Fetch {
+		/// The MoQ client configuration.
+		#[command(flatten)]
+		config: moq_native::ClientConfig,
+
+		/// The URL of the MoQ server.
+		#[arg(long)]
+		url: Url,
+
+		/// The name of the broadcast to fetch from.
+		#[arg(long)]
+		name: String,
+
+		#[command(flatten)]
+		args: FetchArgs,
+	},
 }
 
 #[tokio::main]
@@ -156,6 +176,19 @@ async fn main() -> anyhow::Result<()> {
 
 			run_subscribe(client, url, name, args).await
 		}
+		Command::Fetch {
+			config,
+			url,
+			name,
+			args,
+		} => {
+			let client = config.init()?;
+
+			#[cfg(feature = "iroh")]
+			let client = client.with_iroh(iroh);
+
+			run_fetch(client, url, name, args).await
+		}
 	}
 }
 
@@ -179,6 +212,28 @@ async fn run_subscribe(client: moq_native::Client, url: Url, name: String, args:
 
 	tokio::select! {
 		res = subscribe.run() => res,
+		res = reconnect.closed() => res,
+		_ = tokio::signal::ctrl_c() => Ok(()),
+	}
+}
+
+async fn run_fetch(client: moq_native::Client, url: Url, name: String, args: FetchArgs) -> anyhow::Result<()> {
+	let origin = moq_lite::Origin::random().produce();
+	let consumer = origin.consume();
+
+	tracing::info!(%url, %name, "connecting");
+
+	let reconnect = client.with_consume(origin).reconnect(url);
+
+	let broadcast = consumer
+		.announced_broadcast(&name)
+		.await
+		.ok_or_else(|| anyhow::anyhow!("origin closed before broadcast was announced"))?;
+
+	let fetch = Fetch::new(broadcast, args);
+
+	tokio::select! {
+		res = fetch.run() => res,
 		res = reconnect.closed() => res,
 		_ = tokio::signal::ctrl_c() => Ok(()),
 	}

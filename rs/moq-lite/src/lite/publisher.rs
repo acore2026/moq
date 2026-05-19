@@ -280,6 +280,8 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		let track = Track {
 			name: subscribe.track.to_string(),
 			priority: subscribe.priority,
+			start_group: subscribe.start_group,
+			end_group: subscribe.end_group,
 		};
 
 		let broadcast = consumer.ok_or(Error::NotFound)?;
@@ -291,8 +293,8 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 			priority: track.priority,
 			ordered: false,
 			max_latency: std::time::Duration::ZERO,
-			start_group: None,
-			end_group: None,
+			start_group: subscribe.start_group,
+			end_group: subscribe.end_group,
 		};
 
 		stream.writer.encode(&lite::SubscribeResponse::Ok(info)).await?;
@@ -332,6 +334,9 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 			}?;
 
 			let sequence = group.sequence;
+			if subscribe.end_group.is_some_and(|end| sequence > end) {
+				return Ok(());
+			}
 			tracing::debug!(subscribe = %subscribe.id, track = %track.name, sequence, "serving group");
 
 			let msg = lite::Group {

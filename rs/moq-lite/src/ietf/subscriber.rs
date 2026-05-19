@@ -230,6 +230,9 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		let res = self.write_publish_ok(&mut stream, &msg).await;
 
 		if res.is_ok() {
+			if self.version == Version::Draft17 {
+				let _ = stream.writer.finish();
+			}
 			// Wait for PublishDone or stream close
 			let _ = stream.reader.closed().await;
 		}
@@ -347,8 +350,17 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 					.await?;
 			}
 			Version::Draft17 => {
-				stream.writer.encode(&ietf::RequestOk::ID).await?;
-				stream.writer.encode(&ietf::RequestOk { request_id: None }).await?;
+				stream.writer.encode(&ietf::PublishOk::ID).await?;
+				stream
+					.writer
+					.encode(&ietf::PublishOk {
+						request_id: None,
+						forward: true,
+						subscriber_priority: 128,
+						group_order: GroupOrder::Descending,
+						filter_type: FilterType::LargestObject,
+					})
+					.await?;
 			}
 		}
 		Ok(())
@@ -465,6 +477,8 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		let track = Track {
 			name: msg.track_name.to_string(),
 			priority: 0,
+			start_group: None,
+			end_group: None,
 		}
 		.produce();
 
