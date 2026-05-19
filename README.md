@@ -23,6 +23,18 @@ The core networking is delegated to a QUIC library but the rest is in applicatio
 
 > **Note:** This project implements [moq-lite](https://doc.moq.dev/concept/layer/moq-lite), a forwards-compatible subset of the IETF [moq-transport](https://datatracker.ietf.org/doc/draft-ietf-moq-transport/) draft. moq-lite works with any moq-transport CDN (ex. [Cloudflare](https://moq.dev/blog/first-cdn/)). The focus is narrower, prioritizing simplicity and deployability.
 
+## Fork Status
+
+This repository is based on the upstream [`moq-dev/moq`](https://github.com/moq-dev/moq) project.
+The local Rust branch keeps the upstream layered design, with additional work focused on interoperability, object streams, and backfill workflows:
+
+- **IETF draft-17 interop**: updated message sizing, subscribe parameter decoding, and publish response handling for draft-17 peers.
+- **Range-aware subscriptions**: tracks can carry optional start and end group bounds for replay, fetch, and backfill use cases.
+- **Fetch support**: the IETF publisher path can answer standalone fetch requests from cached groups; joining fetch remains unsupported.
+- **Object CLI pipeline**: `moq-cli` can publish, subscribe, and fetch arbitrary object frames through stdin/stdout, in addition to media formats.
+- **Configurable cache retention**: `MOQ_LITE_MAX_GROUP_AGE_SECS` can extend the in-memory group cache beyond the default 30 seconds.
+- **Python bindings path**: Python applications can use `py/moq-lite`, which wraps the Rust `moq-ffi` bindings.
+
 ## Demo
 
 This repository is split into multiple binaries and libraries across different languages.
@@ -48,34 +60,27 @@ Note that this uses an insecure HTTP fetch for local development only; in produc
 
 *TIP:* If you've installed [nix-direnv](https://github.com/nix-community/nix-direnv), then only `just` is required.
 
-### Python Integration
+### Object and Fetch CLI
 
-A complete Python video streaming demo is available in [`demo/python`](demo/python) that demonstrates:
+This branch extends `moq-cli` with an object-oriented stdin/stdout pipeline for non-media data and replay tests.
+The object mode uses the `MOBJ` frame format implemented in [`rs/moq-cli/src/object.rs`](rs/moq-cli/src/object.rs).
 
-- **Python publisher**: Captures video with ffmpeg and publishes to relay using moq-lite
-- **Python subscriber**: Receives video frames and displays in browser
-- **Latency testing**: Benchmarks showing 1-2ms round-trip latency
-- **Remote streaming**: Cross-platform camera capture (Windows/Linux)
+```sh
+# Publish object frames from stdin.
+moq publish --url http://localhost:4443 --name demo object < objects.mobj
 
-**Quick start**:
+# Subscribe to a live object track.
+moq subscribe --url http://localhost:4443 --name demo --output object --track events > live.mobj
 
-```bash
-cd demo/python
-
-# Start relay (QUIC:9003, HTTP:9004)
-python3 scripts/start_relay_with_web.py
-
-# Publish camera video (on remote PC)
-python3 scripts/remote_camera_publisher.py --relay https://SERVER_IP:9003 --broadcast live-stream --no-tls-verify
-
-# View in browser
-open http://SERVER_IP:9004
+# Request a bounded object range and exit after the idle timeout.
+moq fetch --url http://localhost:4443 --name demo --output object --track events --start-group 0 --end-group 10 > replay.mobj
 ```
 
-**Documentation**:
-- [PYTHON_VIDEO_INTEGRATION_FINAL.md](demo/python/PYTHON_VIDEO_INTEGRATION_FINAL.md) - Integration guide
-- [LATENCY_COMPARISON_REPORT.md](demo/python/LATENCY_COMPARISON_REPORT.md) - Performance benchmarks
-- [REMOTE_VIDEO_SETUP_GUIDE.md](demo/python/REMOTE_VIDEO_SETUP_GUIDE.md) - Remote streaming setup
+For longer backfill windows, increase the in-memory group retention before starting the publisher or relay:
+
+```sh
+MOQ_LITE_MAX_GROUP_AGE_SECS=300 just relay
+```
 
 ### Full Setup
 
@@ -142,15 +147,23 @@ This repository provides both [Rust](rs) and [TypeScript](js) libraries with sim
 
 | Crate                       | Description                                                                                                                           | Docs                                                                           |
 |-----------------------------|---------------------------------------------------------------------------------------------------------------------------------------|--------------------------------------------------------------------------------|
-| [moq-lite](rs/moq-lite)          | The core pub/sub transport protocol. Has built-in concurrency and deduplication.                                                      | [![docs.rs](https://docs.rs/moq-lite/badge.svg)](https://docs.rs/moq-lite)     |
+| [moq-lite](rs/moq-lite)          | The core pub/sub transport protocol. Has built-in concurrency, deduplication, range-aware subscriptions, and IETF fetch handling.     | [![docs.rs](https://docs.rs/moq-lite/badge.svg)](https://docs.rs/moq-lite)     |
 | [moq-relay](rs/moq-relay)   | A clusterable relay server. This relay performs fan-out connecting multiple clients and servers together.                             |                                                                                |
 | [moq-token](rs/moq-token)   | An authentication scheme supported by `moq-relay`. Can be used as a library or as [a CLI](rs/moq-token-cli) to authenticate sessions. |                                                                                |
 | [moq-native](rs/moq-native) | Opinionated helpers to configure a Quinn QUIC endpoint. It's harder than it should be.                                                | [![docs.rs](https://docs.rs/moq-native/badge.svg)](https://docs.rs/moq-native) |
 | [libmoq](rs/libmoq)         | C bindings for `moq-lite`.                                                                                                            | [![docs.rs](https://docs.rs/libmoq/badge.svg)](https://docs.rs/libmoq)         |
+| [moq-ffi](rs/moq-ffi)       | UniFFI bindings used by Python and other native language wrappers.                                                                     |                                                                                |
 | [hang](rs/hang)             | Media-specific encoding/streaming layered on top of `moq-lite`. Can be used as a library.                     | [![docs.rs](https://docs.rs/hang/badge.svg)](https://docs.rs/hang)             |
-| [moq-cli](rs/moq-cli)       | A CLI for publishing media to MoQ relays.                                                                                             |                                                                                |
+| [moq-cli](rs/moq-cli)       | A CLI for publishing media, subscribing to fMP4/AVC3 output, and moving arbitrary object frames through MoQ relays.                  |                                                                                |
 | [moq-mux](rs/moq-mux)       | Media muxers and demuxers (fMP4/CMAF, HLS) for importing content into MoQ broadcasts.                                                 | [![docs.rs](https://docs.rs/moq-mux/badge.svg)](https://docs.rs/moq-mux)       |
 | [moq-gst](rs/moq-gst)       | A GStreamer plugin for publishing or consuming MoQ broadcasts. Not built by default; requires GStreamer dev libraries.                         |                                                                                |
+
+### Python
+
+| Package | Description |
+|---------|-------------|
+| [moq-lite](py/moq-lite) | Pythonic wrapper around the Rust `moq-ffi` bindings with async iterators, context managers, and simplified connection setup. |
+| [moq-ffi](rs/moq-ffi) | Lower-level UniFFI surface generated from the Rust protocol stack. |
 
 ### TypeScript
 
@@ -169,6 +182,7 @@ This repository provides both [Rust](rs) and [TypeScript](js) libraries with sim
 Additional documentation and implementation details:
 
 - **[Authentication](doc/app/relay/auth.md)** - JWT tokens, authorization, and security
+- **[Architecture](doc/concept/architecture.md)** - High-level map of the Rust crates, bindings, media layer, and transport runtime
 
 ## Protocol
 
