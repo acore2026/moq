@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "moq-rust-video"
+version = "0.1.0"
+description = "Python control API for Rust MoQ real-time AVC3/H.264 video"
+requires-python = ">=3.10"
+dependencies = []
+
+[tool.setuptools]
+include-package-data = true
+
+[tool.setuptools.packages.find]
+include = ["moq_official_relay*", "moq_rust_client*", "moq_rust_video*"]
+
+[tool.setuptools.package-data]
+moq_rust_video = [
+    "py.typed",
+    "bin/win_amd64/*",
+    "bin/manylinux_x86_64/*",
+    "bin/macosx_arm64/*",
+    "bin/macosx_x86_64/*",
+]

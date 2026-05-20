@@ -1,0 +1,15 @@
+# Minimal Python dependencies for video/moq_windows_camera_publisher.py on Windows.
+#
+# Usage with uv:
+#   uv venv .venv
+#   .venv\Scripts\activate
+#   uv pip install -r moq_rust\requirements-windows-camera-publisher.txt
+#
+# Notes:
+# - The Python moq package/source must also be present on PYTHONPATH, or run this
+#   script from a checkout that contains the moq/ directory.
+# - ffmpeg is not a Python dependency. Install Windows ffmpeg separately and make
+#   sure ffmpeg.exe is available in PATH, or pass --ffmpeg-bin explicitly.
+
+aioquic>=0.9.0
+cryptography>=41.0.0

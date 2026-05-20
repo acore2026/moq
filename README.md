@@ -92,10 +92,10 @@ target/release/moq-cli
 target/release/moq-relay
 ```
 
-The Python integration layer lives in a separate Agent GW repository:
+The Python integration layer lives in this repository:
 
 ```text
-acn_gw_moq-rust/moq_rust/
+py/acn-moq-rust/
 ```
 
 That Python layer packages `moq-cli` into a wheel and exposes Python-friendly
@@ -165,13 +165,13 @@ avc3
 
 ### Package moq-cli into the Python Wheel
 
-In the Agent GW repository, copy the built binary into the Python package data
-directory before building the wheel.
+In the ACN Python integration directory, copy the built binary into the Python
+package data directory before building the wheel.
 
 Linux example:
 
 ```sh
-cd /path/to/acn_gw_moq-rust/moq_rust
+cd /path/to/moq/py/acn-moq-rust
 
 python3 tools/package_moq_rust_video_binary.py \
   /path/to/moq/target/release/moq-cli \
@@ -184,7 +184,7 @@ python3 -m pip wheel . -w dist --no-deps --no-build-isolation
 Windows example:
 
 ```powershell
-cd D:\path\to\acn_gw_moq-rust\moq_rust
+cd D:\path\to\moq\py\acn-moq-rust
 
 python tools\package_moq_rust_video_binary.py `
   D:\path\to\moq\target\release\moq-cli.exe `
@@ -216,13 +216,13 @@ intended:
 9003: Python MOQT relay
 ```
 
-Start the relay and HTTPS viewer from the Agent GW repository:
+Start the relay and HTTPS viewer from the ACN Python integration directory:
 
 ```sh
-cd /path/to/acn_gw_moq-rust
+cd /path/to/moq/py/acn-moq-rust
 
 MOQ_OFFICIAL_RELAY_BIN=/path/to/moq/target/release/moq-relay \
-python3 moq_rust/tools/moq_live_video_viewer.py \
+python3 video/moq_live_video_viewer.py \
   --subscriber rust-avc3 \
   --moq-cli-bin /path/to/moq/target/release/moq-cli \
   --relay-host 0.0.0.0 \

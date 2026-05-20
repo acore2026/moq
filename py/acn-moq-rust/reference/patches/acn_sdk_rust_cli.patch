@@ -1,0 +1,18 @@
+diff --git a/acn_sdk/core/network_service.py b/acn_sdk/core/network_service.py
+index 0005701..20020a1 100644
+--- a/acn_sdk/core/network_service.py
++++ b/acn_sdk/core/network_service.py
+@@ -3,0 +4 @@ import json
++import os
+@@ -175,0 +177,10 @@ class SDKNetworkMixin:
++        moq_impl = os.environ.get("ACN_MOQ_IMPL", "python").strip().lower()
++        if moq_impl in {"rust", "rust-cli", "moq-rust"}:
++            from moq_rust_client import RustCliMoQClient
++            return RustCliMoQClient(
++                host=self.config.network.network_ip,
++                remote_port=self.config.network.agent_gw_moq_port,
++                role=role,
++                on_object_received=self._handle_moq_object_received if role == "subscriber" else None,
++            )
+             host=self.config.network.network_ip,
+             remote_port=self.config.network.agent_gw_moq_port,
