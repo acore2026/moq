@@ -67,13 +67,13 @@ The object mode uses the `MOBJ` frame format implemented in [`rs/moq-cli/src/obj
 
 ```sh
 # Publish object frames from stdin.
-moq publish --url http://localhost:4443 --name demo object < objects.mobj
+moq-cli publish --url http://localhost:4443 --name demo object < objects.mobj
 
 # Subscribe to a live object track.
-moq subscribe --url http://localhost:4443 --name demo --output object --track events > live.mobj
+moq-cli subscribe --url http://localhost:4443 --name demo --output object --track events > live.mobj
 
 # Request a bounded object range and exit after the idle timeout.
-moq fetch --url http://localhost:4443 --name demo --output object --track events --start-group 0 --end-group 10 > replay.mobj
+moq-cli fetch --url http://localhost:4443 --name demo --output object --track events --start-group 0 --end-group 10 > replay.mobj
 ```
 
 For longer backfill windows, increase the in-memory group retention before starting the publisher or relay:

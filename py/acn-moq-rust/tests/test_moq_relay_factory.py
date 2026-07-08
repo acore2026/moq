@@ -14,7 +14,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT))
 sys.path.insert(0, str(MOQ_RUST_ROOT))
 
-from moq_rust.relay_factory import (
+from relay_factory import (
     BRIDGE_RELAY_IMPL,
     PYTHON_RELAY_IMPL,
     RUST_RELAY_IMPL,

@@ -12,9 +12,12 @@ import sys
 import pytest
 
 MOQ_RUST_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+WORKSPACE_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(MOQ_RUST_ROOT)))
+MOQ_PYTHON_ROOT = os.path.join(WORKSPACE_ROOT, 'moq-python')
 REPO_ROOT = os.path.dirname(MOQ_RUST_ROOT)
 sys.path.insert(0, REPO_ROOT)
 sys.path.insert(0, MOQ_RUST_ROOT)
+sys.path.insert(0, MOQ_PYTHON_ROOT)
 
 from moq import FullTrackName
 from moq.pub import MOQPublisher, PublishedObject

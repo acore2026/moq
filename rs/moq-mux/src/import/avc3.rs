@@ -5,6 +5,8 @@ use anyhow::Context;
 use bytes::{Buf, Bytes, BytesMut};
 use tokio::io::{AsyncRead, AsyncReadExt};
 
+const EPOCH_MS_SEI_UUID: &[u8; 16] = b"moq-avc3-ts-ms!!";
+
 /// A decoder for H.264 with inline SPS/PPS.
 pub struct Avc3 {
 	// The catalog being produced.
@@ -271,11 +273,15 @@ impl Avc3 {
 
 		let pts = pts.context("missing timestamp")?;
 
-		let payload = std::mem::take(&mut self.current.chunks).freeze();
+		let mut payload = BytesMut::new();
+		if let Some(sent_epoch_ms) = unix_epoch_ms() {
+			append_epoch_ms_sei(&mut payload, sent_epoch_ms);
+		}
+		payload.extend_from_slice(&std::mem::take(&mut self.current.chunks));
 
 		let frame = crate::container::Frame {
 			timestamp: pts,
-			payload,
+			payload: payload.freeze(),
 			keyframe: self.current.contains_idr,
 		};
 
@@ -314,6 +320,39 @@ impl Avc3 {
 		Ok(hang::container::Timestamp::from_micros(
 			zero.elapsed().as_micros() as u64
 		)?)
+	}
+}
+
+fn unix_epoch_ms() -> Option<u64> {
+	std::time::SystemTime::now()
+		.duration_since(std::time::UNIX_EPOCH)
+		.ok()
+		.map(|duration| duration.as_millis().min(u64::MAX as u128) as u64)
+}
+
+fn append_epoch_ms_sei(output: &mut BytesMut, sent_epoch_ms: u64) {
+	let mut rbsp = Vec::with_capacity(27);
+	rbsp.push(5); // user_data_unregistered
+	rbsp.push(24); // UUID + u64 epoch timestamp
+	rbsp.extend_from_slice(EPOCH_MS_SEI_UUID);
+	rbsp.extend_from_slice(&sent_epoch_ms.to_be_bytes());
+	rbsp.push(0x80); // rbsp_trailing_bits
+
+	output.extend_from_slice(&START_CODE);
+	output.extend_from_slice(&[0x06]); // NAL unit type 6: SEI
+
+	let mut zero_run = 0;
+	for byte in rbsp {
+		if zero_run >= 2 && byte <= 0x03 {
+			output.extend_from_slice(&[0x03]);
+			zero_run = 0;
+		}
+		output.extend_from_slice(&[byte]);
+		if byte == 0 {
+			zero_run += 1;
+		} else {
+			zero_run = 0;
+		}
 	}
 }
 

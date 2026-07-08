@@ -89,10 +89,11 @@ cargo build --release --package moq-relay
 如果要把 `moq-cli` 一起打进 wheel，先复制对应平台二进制：
 
 ```bash
-cd moq_rust
+cd /path/to/moq/py/acn-moq-rust
 python tools/package_moq_rust_video_binary.py \
   /path/to/moq-rust/moq/target/release/moq-cli \
-  --platform manylinux_x86_64
+  --system Linux \
+  --machine x86_64
 ```
 
 然后构建 wheel：
@@ -112,7 +113,8 @@ Windows 端需要打包 `moq-cli.exe`：
 ```powershell
 python tools\package_moq_rust_video_binary.py `
   D:\path\to\moq-rust\moq\target\release\moq-cli.exe `
-  --platform win_amd64
+  --system Windows `
+  --machine AMD64
 python -m pip wheel . -w dist --no-deps --no-build-isolation
 ```
 

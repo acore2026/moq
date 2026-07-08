@@ -2,7 +2,7 @@
 set -euo pipefail
 
 VIDEO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-ROOT_DIR="$(cd "${VIDEO_DIR}/../.." && pwd)"
+ROOT_DIR="$(cd "${VIDEO_DIR}/.." && pwd)"
 RUN_DIR="${ROOT_DIR}/.video_test"
 PID_FILE="${RUN_DIR}/video_test.pid"
 LOG_FILE="${RUN_DIR}/video_test.log"

@@ -22,11 +22,12 @@ Multi-arch images (`linux/amd64` and `linux/arm64`) are published to [Docker Hub
 ### Publish a Video File
 
 ```bash
-moq-cli publish video.mp4 https://relay.example.com/anon/my-stream
+moq-cli publish --url https://relay.example.com/ --name my-stream fmp4 < video.mp4
 ```
 
 ### Publish from FFmpeg
 
 ```bash
-ffmpeg -i input.mp4 -f mpegts - | moq-cli publish - https://relay.example.com/anon/my-stream
+ffmpeg -i input.mp4 -c:v libx264 -bsf:v h264_mp4toannexb -f h264 - \
+  | moq-cli publish --url https://relay.example.com/ --name my-stream avc3
 ```

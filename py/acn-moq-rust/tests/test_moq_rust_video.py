@@ -45,7 +45,7 @@ def test_verify_moq_cli_supports_avc3_accepts_help_output(monkeypatch):
         return subprocess.CompletedProcess(
             args=args[0],
             returncode=0,
-            stdout='[possible values: avc3, fmp4]',
+            stdout='[possible values: avc3, fmp4, object]',
         )
 
     monkeypatch.setattr(subprocess, 'run', fake_run)
@@ -131,6 +131,21 @@ def test_read_avc3_frame_decodes_mavc_stream():
 
     assert frame.timestamp_us == 12345
     assert frame.keyframe is True
+    assert frame.payload == payload
+    assert frame.received_epoch_ms > 0
+
+
+def test_read_avc3_frame_decodes_mavt_stream_with_sent_timestamp():
+    payload = b'\x00\x00\x00\x01\x65abc'
+    stream = io.BytesIO(
+        struct.pack('!4sQBQI', b'MAVT', 12345, 1, 987654321, len(payload)) + payload
+    )
+
+    frame = read_avc3_frame(stream)
+
+    assert frame.timestamp_us == 12345
+    assert frame.keyframe is True
+    assert frame.sent_epoch_ms == 987654321
     assert frame.payload == payload
     assert frame.received_epoch_ms > 0
 

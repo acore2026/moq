@@ -58,7 +58,9 @@ from moq_official_relay import RustMOQRelay
 logger = logging.getLogger('moq-live-video-viewer')
 
 AVC3_FRAME_MAGIC = b'MAVC'
-AVC3_FRAME_HEADER = struct.Struct('!4sQBI')
+AVC3_TIMED_FRAME_MAGIC = b'MAVT'
+AVC3_LEGACY_FRAME_HEADER = struct.Struct('!QBI')
+AVC3_TIMED_FRAME_HEADER = struct.Struct('!QBQI')
 
 
 VIEWER_HTML = r"""<!doctype html>
@@ -205,8 +207,9 @@ VIEWER_HTML = r"""<!doctype html>
       <h1>MOQ Live Video</h1>
       <div class="status" id="status">Waiting for stream...</div>
       <div class="grid">
-        <div class="metric"><div class="label">FPS</div><div class="value" id="fps">0.0</div></div>
-        <div class="metric"><div class="label">Bitrate</div><div class="value" id="bitrate">0.00 Mbps</div></div>
+        <div class="metric"><div class="label">FPS 60s</div><div class="value" id="fps">0.0</div></div>
+        <div class="metric"><div class="label">FPS 5s</div><div class="value" id="fps5s">0.0</div></div>
+        <div class="metric"><div class="label">Bitrate 60s</div><div class="value" id="bitrate">0.00 Mbps</div></div>
         <div class="metric"><div class="label">Frames</div><div class="value" id="frames">0</div></div>
         <div class="metric"><div class="label">Dropped</div><div class="value" id="dropped">0</div></div>
         <div class="metric"><div class="label">Latency P50</div><div class="value" id="latP50">n/a</div></div>
@@ -229,13 +232,14 @@ VIEWER_HTML = r"""<!doctype html>
     const latencies = [];
     const jitters = [];
     const frameArrival = [];
+    const recentSamples = [];
     let decoder = null;
     let configured = false;
     let frames = 0;
     let bytes = 0;
     let dropped = 0;
     let lastFrameId = null;
-    let firstStatAt = performance.now();
+    let firstSampleAt = null;
     let mediaMode = null;
     let mediaSource = null;
     let sourceBuffer = null;
@@ -256,6 +260,47 @@ VIEWER_HTML = r"""<!doctype html>
 
     function fmtMs(value) {
       return value == null ? 'n/a' : `${value.toFixed(1)} ms`;
+    }
+
+    function recordRecentSample(byteLength) {
+      const now = performance.now();
+      if (firstSampleAt === null) firstSampleAt = now;
+      recentSamples.push({ at: now, bytes: byteLength });
+      const cutoff = now - 60000;
+      while (recentSamples.length && recentSamples[0].at < cutoff) {
+        recentSamples.shift();
+      }
+    }
+
+    function windowRates(windowMs) {
+      const now = performance.now();
+      const cutoff = now - windowMs;
+      const samples = recentSamples.filter((sample) => sample.at >= cutoff);
+      if (!samples.length) {
+        return { fps: 0, mbps: 0, seconds: 0 };
+      }
+      const windowSeconds = Math.max((now - samples[0].at) / 1000, 0.001);
+      const windowBytes = samples.reduce((total, sample) => total + sample.bytes, 0);
+      return {
+        fps: samples.length / windowSeconds,
+        mbps: windowBytes * 8 / windowSeconds / 1000000,
+        seconds: windowSeconds,
+      };
+    }
+
+    function recentRates() {
+      const now = performance.now();
+      const cutoff = now - 60000;
+      while (recentSamples.length && recentSamples[0].at < cutoff) {
+        recentSamples.shift();
+      }
+      const rates60s = windowRates(60000);
+      const rates5s = windowRates(5000);
+      return {
+        fps: rates60s.fps,
+        fps5s: rates5s.fps,
+        mbps: rates60s.mbps,
+      };
     }
 
     function updateClock() {
@@ -319,9 +364,10 @@ VIEWER_HTML = r"""<!doctype html>
     }
 
     function updateMetrics() {
-      const elapsed = Math.max((performance.now() - firstStatAt) / 1000, 0.001);
-      setText('fps', (frames / elapsed).toFixed(1));
-      setText('bitrate', `${(bytes * 8 / elapsed / 1000000).toFixed(2)} Mbps`);
+      const rates = recentRates();
+      setText('fps', rates.fps.toFixed(1));
+      setText('fps5s', rates.fps5s.toFixed(1));
+      setText('bitrate', `${rates.mbps.toFixed(2)} Mbps`);
       setText('frames', mediaMode === 'fmp4' ? String(fmp4Chunks) : String(frames));
       setText('dropped', String(dropped));
       setText('latNow', fmtMs(latencies.at(-1)));
@@ -424,6 +470,7 @@ VIEWER_HTML = r"""<!doctype html>
       if (frameArrival.length > 300) frameArrival.shift();
       frames += 1;
       bytes += data.byteLength;
+      recordRecentSample(data.byteLength);
       const chunk = new EncodedVideoChunk({
         type: meta.keyframe || containsIdr(data) ? 'key' : 'delta',
         timestamp: meta.timestamp_us || Math.round(frameId * 1000000 / (meta.fps || 30)),
@@ -437,6 +484,7 @@ VIEWER_HTML = r"""<!doctype html>
       setMediaMode('fmp4');
       const chunk = new Uint8Array(buffer);
       bytes += chunk.byteLength;
+      recordRecentSample(chunk.byteLength);
       fmp4Chunks += 1;
       frames = fmp4Chunks;
       appendQueue.push(chunk);
@@ -507,6 +555,7 @@ class RuntimeStats:
     relay_rss_bytes: int = 0
     subscriber_state: str = 'starting'
     latencies_ms: list[float] = field(default_factory=list)
+    recent_samples: list[tuple[float, int]] = field(default_factory=list)
 
     def on_meta(self, meta: dict) -> None:
         self.meta_frames += 1
@@ -519,6 +568,7 @@ class RuntimeStats:
     def on_video(self, frame_id: int, payload_bytes: int) -> None:
         self.video_frames += 1
         self.video_bytes += payload_bytes
+        self._record_recent_sample(payload_bytes)
         if self.last_frame_id is not None and frame_id > self.last_frame_id + 1:
             self.dropped_frames += frame_id - self.last_frame_id - 1
         self.last_frame_id = frame_id
@@ -527,9 +577,42 @@ class RuntimeStats:
         self.fmp4_chunks += 1
         self.video_frames = self.fmp4_chunks
         self.video_bytes += payload_bytes
+        self._record_recent_sample(payload_bytes)
+
+    def _record_recent_sample(self, payload_bytes: int) -> None:
+        now = time.monotonic()
+        self.recent_samples.append((now, payload_bytes))
+        self._prune_recent_samples(now)
+
+    def _prune_recent_samples(self, now: Optional[float] = None) -> None:
+        now = time.monotonic() if now is None else now
+        cutoff = now - 60
+        while self.recent_samples and self.recent_samples[0][0] < cutoff:
+            self.recent_samples.pop(0)
+
+    def _recent_rates(self, window_seconds: float) -> tuple[float, float, float]:
+        now = time.monotonic()
+        self._prune_recent_samples(now)
+        cutoff = now - window_seconds
+        samples = [
+            (sample_at, payload_bytes)
+            for sample_at, payload_bytes in self.recent_samples
+            if sample_at >= cutoff
+        ]
+        if not samples:
+            return 0.0, 0.0, 0.0
+        observed_seconds = max(now - samples[0][0], 0.001)
+        window_bytes = sum(payload_bytes for _, payload_bytes in samples)
+        return (
+            len(samples) / observed_seconds,
+            window_bytes * 8 / observed_seconds / 1_000_000,
+            observed_seconds,
+        )
 
     def snapshot(self) -> dict:
         elapsed = max(time.monotonic() - self.started_at, 0.001)
+        fps_60s, mbps_60s, window_60s = self._recent_rates(60)
+        fps_5s, mbps_5s, window_5s = self._recent_rates(5)
         return {
             'media_mode': self.media_mode,
             'subscriber_state': self.subscriber_state,
@@ -537,8 +620,14 @@ class RuntimeStats:
             'meta_frames': self.meta_frames,
             'fmp4_chunks': self.fmp4_chunks,
             'dropped_frames': self.dropped_frames,
-            'fps': self.video_frames / elapsed,
-            'mbps': self.video_bytes * 8 / elapsed / 1_000_000,
+            'fps': fps_60s,
+            'mbps': mbps_60s,
+            'fps_5s': fps_5s,
+            'mbps_5s': mbps_5s,
+            'fps_total': self.video_frames / elapsed,
+            'mbps_total': self.video_bytes * 8 / elapsed / 1_000_000,
+            'stats_window_seconds': window_60s,
+            'stats_window_5s_seconds': window_5s,
             'relay_rss_bytes': self.relay_rss_bytes,
             'latency_ms': {
                 'avg': (
@@ -928,14 +1017,25 @@ async def rust_avc3_subscriber_loop(
                 raise RuntimeError('moq-cli stdout pipe was not created')
             stats.subscriber_state = 'rust AVC3 subscriber running'
             while True:
-                header = await process.stdout.readexactly(AVC3_FRAME_HEADER.size)
-                magic, timestamp_us, keyframe, payload_len = AVC3_FRAME_HEADER.unpack(header)
-                if magic != AVC3_FRAME_MAGIC:
+                magic = await process.stdout.readexactly(4)
+                if magic == AVC3_TIMED_FRAME_MAGIC:
+                    header = await process.stdout.readexactly(AVC3_TIMED_FRAME_HEADER.size)
+                    timestamp_us, keyframe, sent_epoch_ms, payload_len = (
+                        AVC3_TIMED_FRAME_HEADER.unpack(header)
+                    )
+                elif magic == AVC3_FRAME_MAGIC:
+                    header = await process.stdout.readexactly(AVC3_LEGACY_FRAME_HEADER.size)
+                    timestamp_us, keyframe, payload_len = (
+                        AVC3_LEGACY_FRAME_HEADER.unpack(header)
+                    )
+                    sent_epoch_ms = 0
+                else:
                     raise RuntimeError(f'invalid AVC3 frame magic: {magic!r}')
                 if payload_len <= 0 or payload_len > args.avc3_max_frame_bytes:
                     raise RuntimeError(f'invalid AVC3 frame length: {payload_len}')
                 payload = await process.stdout.readexactly(payload_len)
                 meta = {
+                    'type': 'frame_meta',
                     'frame_id': frame_id,
                     'timestamp_us': timestamp_us,
                     'keyframe': bool(keyframe),
@@ -946,6 +1046,8 @@ async def rust_avc3_subscriber_loop(
                     'subscriber_received_epoch_ms': time.time() * 1000,
                     'subscriber_received_monotonic_ns': time.monotonic_ns(),
                 }
+                if sent_epoch_ms > 0:
+                    meta['sent_epoch_ms'] = sent_epoch_ms
                 put_drop_oldest(
                     output_queue,
                     ('meta', frame_id, json.dumps(meta, separators=(',', ':')).encode('utf-8')),

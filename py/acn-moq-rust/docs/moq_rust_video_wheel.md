@@ -94,7 +94,7 @@ moq-cli subscribe --help
 输出中必须包含：
 
 ```text
-[possible values: avc3, fmp4]
+[possible values: avc3, fmp4, object]
 ```
 
 ## 5. Linux wheel 构建流程
@@ -282,7 +282,7 @@ subscriber = Avc3Subscriber(
 )
 
 for frame in subscriber.frames():
-    print(frame.timestamp_us, frame.keyframe, len(frame.payload))
+    print(frame.timestamp_us, frame.keyframe, frame.sent_epoch_ms, len(frame.payload))
 ```
 
 `Avc3Frame` 字段：
@@ -293,6 +293,7 @@ for frame in subscriber.frames():
 | `timestamp_us` | MoQ 媒体时间戳，单位微秒 |
 | `keyframe` | 是否关键帧 |
 | `received_epoch_ms` | Python 收到帧的本机时间 |
+| `sent_epoch_ms` | 发布端写入 AVC3 SEI 的发送时间戳；旧帧格式为 0 |
 
 ## 11. 关键参数建议
 

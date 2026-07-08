@@ -15,7 +15,9 @@ from .errors import FrameDecodeError, ProcessExitedError
 from .process import LogBuffer, popen, start_stderr_drain
 
 AVC3_FRAME_MAGIC = b'MAVC'
-AVC3_FRAME_HEADER = struct.Struct('!4sQBI')
+AVC3_TIMED_FRAME_MAGIC = b'MAVT'
+AVC3_LEGACY_FRAME_HEADER = struct.Struct('!QBI')
+AVC3_TIMED_FRAME_HEADER = struct.Struct('!QBQI')
 
 
 @dataclass(frozen=True)
@@ -26,6 +28,7 @@ class Avc3Frame:
     timestamp_us: int
     keyframe: bool
     received_epoch_ms: float
+    sent_epoch_ms: int = 0
 
 
 class Avc3Subscriber:
@@ -137,12 +140,18 @@ class Avc3Subscriber:
 
 
 def read_avc3_frame(stream: BinaryIO, max_frame_bytes: int = 2_000_000) -> Avc3Frame:
-    """Read and decode one MAVC-framed H.264 frame from a binary stream."""
-    header = _read_exact(stream, AVC3_FRAME_HEADER.size)
-    magic, timestamp_us, keyframe, payload_len = AVC3_FRAME_HEADER.unpack(header)
-
-    if magic != AVC3_FRAME_MAGIC:
+    """Read and decode one MAVC/MAVT-framed H.264 frame from a binary stream."""
+    magic = _read_exact(stream, 4)
+    if magic == AVC3_TIMED_FRAME_MAGIC:
+        header = _read_exact(stream, AVC3_TIMED_FRAME_HEADER.size)
+        timestamp_us, keyframe, sent_epoch_ms, payload_len = AVC3_TIMED_FRAME_HEADER.unpack(header)
+    elif magic == AVC3_FRAME_MAGIC:
+        header = _read_exact(stream, AVC3_LEGACY_FRAME_HEADER.size)
+        timestamp_us, keyframe, payload_len = AVC3_LEGACY_FRAME_HEADER.unpack(header)
+        sent_epoch_ms = 0
+    else:
         raise FrameDecodeError(f'invalid AVC3 frame magic: {magic!r}')
+
     if payload_len <= 0 or payload_len > max_frame_bytes:
         raise FrameDecodeError(f'invalid AVC3 frame payload length: {payload_len}')
 
@@ -152,6 +161,7 @@ def read_avc3_frame(stream: BinaryIO, max_frame_bytes: int = 2_000_000) -> Avc3F
         timestamp_us=timestamp_us,
         keyframe=bool(keyframe),
         received_epoch_ms=time.time() * 1000,
+        sent_epoch_ms=sent_epoch_ms,
     )
 
 

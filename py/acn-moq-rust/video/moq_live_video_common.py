@@ -6,8 +6,12 @@ Shared helpers for live H.264 MOQ video test tools.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import Any
 
-from moq import FullTrackName
+try:
+    from moq import FullTrackName
+except ImportError:
+    FullTrackName = None
 
 
 DEFAULT_NAMESPACE = 'agent/video/windows-camera'
@@ -17,7 +21,12 @@ VCL_NAL_TYPES = {1, 5}
 IDR_NAL_TYPE = 5
 
 
-def build_track(namespace: str, name: str) -> FullTrackName:
+def build_track(namespace: str, name: str) -> Any:
+    if FullTrackName is None:
+        raise RuntimeError(
+            'Python moq package is required for the python subscriber mode; '
+            'use --subscriber rust-avc3 for the Rust moq-cli video path.'
+        )
     namespace_parts = [
         part.encode('utf-8')
         for part in namespace.strip('/').split('/')

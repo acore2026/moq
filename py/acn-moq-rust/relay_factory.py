@@ -71,7 +71,7 @@ def create_moq_relay(
     )
 
     if relay_impl == RUST_RELAY_IMPL:
-        from .moq_official_relay import RustMOQRelay
+        from moq_official_relay import RustMOQRelay
 
         return RustMOQRelay(
             host=host,
@@ -82,7 +82,7 @@ def create_moq_relay(
         )
 
     if relay_impl == BRIDGE_RELAY_IMPL:
-        from .moq_official_relay import BridgeMOQRelay
+        from moq_official_relay import BridgeMOQRelay
 
         return BridgeMOQRelay(
             host=host,
