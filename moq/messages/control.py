@@ -157,11 +157,15 @@ class RequestErrorMessage:
     request_id: int
     error_code: int
     reason: str
+    # ACN-bound sessions append this field; None preserves ordinary MOQ bytes.
+    retry_interval: Optional[int] = None
     
     def encode(self) -> bytes:
         payload = VarInt.encode(self.request_id)
         payload += VarInt.encode(self.error_code)
         payload += ReasonPhrase(self.reason).encode()
+        if self.retry_interval is not None:
+            payload += VarInt.encode(self.retry_interval)
         return VarInt.encode(MessageType.REQUEST_ERROR) + encode_bytes(payload)
     
     @staticmethod
@@ -169,7 +173,12 @@ class RequestErrorMessage:
         request_id, consumed1 = VarInt.decode(data, offset)
         error_code, consumed2 = VarInt.decode(data, offset + consumed1)
         reason, consumed3 = ReasonPhrase.decode(data, offset + consumed1 + consumed2)
-        return RequestErrorMessage(request_id, error_code, reason.text), consumed1 + consumed2 + consumed3
+        consumed = consumed1 + consumed2 + consumed3
+        retry_interval = None
+        if offset + consumed < len(data):
+            retry_interval, extra = VarInt.decode(data, offset + consumed)
+            consumed += extra
+        return RequestErrorMessage(request_id, error_code, reason.text, retry_interval), consumed
 
 
 # Subscribe messages

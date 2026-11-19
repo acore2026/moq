@@ -1,5 +1,7 @@
 # MOQ Transport - Python Implementation
 
+可选 ACN L5 扩展见 [ACN 接入说明](moq/acn/README.md)。默认 MOQ 示例和发布订阅流程保持独立，只有显式使用 ACN 入口才启用群组授权与目录处理。
+
 ## 项目背景
 
 本项目使用Python语言实现 [draft-ietf-moq-transport-17](https://datatracker.ietf.org/doc/draft-ietf-moq-transport/) 中定义的 **MOQ Transport (MOQT)** 协议。
