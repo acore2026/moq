@@ -15,7 +15,7 @@
 ### 系统要求
 
 **最低要求**:
-- Python 3.8+
+- Python 3.10+
 - 4GB RAM
 - 1GB 磁盘空间
 
@@ -28,10 +28,9 @@
 
 | 操作系统 | 版本要求 | 支持状态 |
 |---------|---------|---------|
-| Ubuntu | 18.04+ | ✅ 完全支持 |
-| CentOS | 7+ | ✅ 完全支持 |
-| Windows | 10/11 | ✅ 完全支持 |
-| macOS | 10.14+ | ✅ 完全支持 |
+| Linux | 安装 Python 3.10+ | ✅ 完全支持 |
+| Windows | 10/11，安装 Python 3.10+ | ✅ 完全支持 |
+| macOS | 安装 Python 3.10+ | ✅ 完全支持 |
 
 ---
 
@@ -77,8 +76,8 @@ where python
 ### 3. 安装依赖
 
 ```bash
-# 安装项目依赖
-pip install -r requirements.txt
+# 安装项目及默认依赖
+pip install -e .
 
 # 验证安装
 pip list
@@ -86,12 +85,11 @@ pip list
 
 预期输出：
 ```
-aioquic          0.9.x
-cryptography     3.x.x
-pylsqpack        0.3.x
-pyopenssl        20.x.x
-service-identity 18.x.x
+aioquic          1.3.0
 ```
+
+其余依赖由安装器解析。默认安装已包含 ACN 所需依赖，无需指定额外安装选项；
+普通 MOQ 与 AGW 仍由各自入口显式启动，安装本身不启动服务。
 
 ### 4. 验证安装
 

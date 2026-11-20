@@ -2,6 +2,9 @@
 
 可选 ACN L5 扩展见 [ACN 接入说明](moq/acn/README.md)。默认 MOQ 示例和发布订阅流程保持独立，只有显式使用 ACN 入口才启用群组授权与目录处理。
 
+安装包默认包含 ACN 所需依赖，统一使用 `aioquic==1.3.0`，无需指定 `[acn]`。
+安装操作不会启动 Relay；普通 MOQ 与 AGW 仍通过各自入口显式启动。
+
 ## 项目背景
 
 本项目使用Python语言实现 [draft-ietf-moq-transport-17](https://datatracker.ietf.org/doc/draft-ietf-moq-transport/) 中定义的 **MOQ Transport (MOQT)** 协议。
@@ -150,10 +153,10 @@ graph LR
 
 ## 技术栈
 
-- **语言**: Python 3.8+
+- **语言**: Python 3.10+
 - **QUIC 框架**: aioquic (支持连接迁移、双向流、数据报)
 - **依赖**:
-  - aioquic >= 0.9.0
+  - aioquic == 1.3.0
   - cryptography >= 3.0
   - pylsqpack >= 0.3.0
   - pyopenssl >= 20.0
@@ -181,9 +184,9 @@ pip install -r requirements.txt
 
 #### 系统要求
 
-- **Linux**: Ubuntu 18.04+, CentOS 7+, 或其他支持 Python 3.8+ 的发行版
-- **Windows**: Windows 10/11, Python 3.8+
-- **macOS**: macOS 10.14+, Python 3.8+
+- **Linux**: 安装 Python 3.10+ 的 Linux 发行版
+- **Windows**: Windows 10/11, Python 3.10+
+- **macOS**: 安装 Python 3.10+ 的 macOS
 
 ### 2. 运行示例
 

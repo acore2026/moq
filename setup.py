@@ -27,18 +27,13 @@ setup(
         "Topic :: Software Development :: Libraries :: Python Modules",
         "License :: OSI Approved :: MIT License",
         "Programming Language :: Python :: 3",
-        "Programming Language :: Python :: 3.8",
-        "Programming Language :: Python :: 3.9",
         "Programming Language :: Python :: 3.10",
         "Programming Language :: Python :: 3.11",
         "Programming Language :: Python :: 3.12",
     ],
-    python_requires=">=3.8",
+    python_requires=">=3.10",
     install_requires=requirements,
     extras_require={
-        # ACN uses explicit, tested transport progress hooks; ordinary MOQ's
-        # dependency range and entry points remain unchanged.
-        "acn": ["aioquic==1.3.0"],
         "dev": [
             "pytest>=7.0",
             "pytest-asyncio>=0.21.0",

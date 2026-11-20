@@ -5,11 +5,13 @@ on the existing MOQ wire encoding. `MOQRelay`, `Publisher`, `Subscriber`, their
 entry points, TLS profile, cache and ordinary authorization behavior are unchanged.
 Importing the base package does not activate ACN policy.
 
-Install the matching source/wheel with the `acn` extra, which pins the tested
-`aioquic==1.3.0` transport progress hooks:
+Install the matching source/wheel using Python 3.10 or later. The default
+dependencies pin the tested `aioquic==1.3.0` transport progress hooks; no extra
+installation option is required. Installation does not start a Relay or enable
+ACN policy on ordinary MOQ instances:
 
 ```sh
-python3 -m pip install -e '.[acn]'
+python3 -m pip install -e .
 python3 -m pytest -q tests/test_acn_policy.py tests/test_acn_transport.py
 ```
 
